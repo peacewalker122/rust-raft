@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use rand::RngExt;
 
 use crate::log::log::LogEntry;
+use crate::node::error::NodeError;
 
 #[derive(Debug)]
 enum NodeState {
@@ -70,10 +71,10 @@ impl RaftNode {
         self.election_timer = std::time::Instant::now() + randomized_election_timeout();
     }
 
-    pub fn become_leader(&mut self) {
+    pub fn become_leader(&mut self) -> Result<(), NodeError> {
         self.state = NodeState::Leader;
         // Initialize next_index and match_index for each peer
-        let last_idx = self.last_log_index();
+        let last_idx = self.last_log_index()?;
 
         for peer in &self.peers {
             self.next_index
@@ -83,6 +84,8 @@ impl RaftNode {
                 .get_or_insert_with(HashMap::new)
                 .insert(peer.clone(), 0);
         }
+
+        Ok(())
     }
 
     pub fn become_follower(&mut self, term: u64) {
@@ -93,11 +96,17 @@ impl RaftNode {
         self.election_timer = std::time::Instant::now() + randomized_election_timeout();
     }
 
-    pub fn last_log_index(&self) -> u64 {
-        self.log[self.log.len() - 1].index
+    pub fn last_log_index(&self) -> Result<u64, NodeError> {
+        self.log
+            .last()
+            .map(|entry| entry.index)
+            .ok_or(NodeError::EmptyLog)
     }
 
-    pub fn last_log_term(&self) -> u64 {
-        self.log[self.log.len() - 1].term
+    pub fn last_log_term(&self) -> Result<u64, NodeError> {
+        self.log
+            .last()
+            .map(|entry| entry.term)
+            .ok_or(NodeError::EmptyLog)
     }
 }
