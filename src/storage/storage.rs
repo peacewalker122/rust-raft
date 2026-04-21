@@ -288,9 +288,6 @@ mod tests {
         }
 
         let full_result = PersistentState::deserialize(&encoded);
-        assert!(
-            full_result.is_ok(),
-            "expected Ok for full encoded payload"
-        );
+        assert!(full_result.is_ok(), "expected Ok for full encoded payload");
     }
 }

@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 rand = "0.10.1"
 thiserror = "2.0"
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+prost = "0.14"
 tokio = { version = "1.43", features = [
   "macros",          # Enables #[tokio::main]
   "io-util",         # Essential for AsyncRead/AsyncWrite helpers
@@ -13,3 +16,6 @@ tokio = { version = "1.43", features = [
   "time",            # Needed for timeouts (e.g., during network calls)
   "rt-multi-thread", # Required for Tokio's async runtime
 ] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
