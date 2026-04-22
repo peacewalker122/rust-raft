@@ -15,4 +15,22 @@ pub enum NodeError {
 
     #[error(transparent)]
     Log(#[from] LogError),
+
+    #[error(transparent)]
+    GrpcTransport(#[from] tonic::transport::Error),
+
+    #[error(transparent)]
+    GrpcStatus(#[from] tonic::Status),
+
+    #[error("invalid peer target: {0}")]
+    InvalidPeerTarget(String),
+
+    #[error("request_vote failed: {0}")]
+    RequestVoteFailed(String),
+
+    #[error("append_entries failed: {0}")]
+    AppendEntriesFailed(String),
+
+    #[error("internal server error: {0}")]
+    InternalServerError(String),
 }

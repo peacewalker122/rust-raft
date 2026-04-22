@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use rand::RngExt;
-use tokio::time::{Interval, interval};
+use tokio::time::interval;
 
 use crate::log::log::LogEntry;
 use crate::node::error::NodeError;
+use crate::node::rpc;
 
 #[derive(Debug)]
 enum NodeState {
@@ -14,8 +15,8 @@ enum NodeState {
     Leader,
 }
 
-struct RaftNode {
-    id: String,
+pub struct RaftNode {
+    pub id: String,
     peers: Vec<String>,
 
     current_term: u64,
@@ -31,8 +32,8 @@ struct RaftNode {
     state: NodeState,
 
     // Hearbeat timer and election timer would be implemented here
-    heartbeat_timer: tokio::time::Interval,
-    election_timer: tokio::time::Interval,
+    pub heartbeat_timer: tokio::time::Interval,
+    pub election_timer: tokio::time::Interval,
 }
 
 fn randomized_election_timeout() -> u64 {
@@ -50,8 +51,8 @@ fn randomized_heartbeat_timeout() -> u64 {
 }
 
 impl RaftNode {
-    fn new(id: String, peers: Vec<String>) -> Self {
-        RaftNode {
+    pub fn new(id: String, peers: Vec<String>) -> Self {
+        let mut node = RaftNode {
             id,
             peers,
             current_term: 0,
@@ -62,9 +63,11 @@ impl RaftNode {
             next_index: None,
             match_index: None,
             state: NodeState::Follower,
-            heartbeat_timer: interval(Duration::from_millis(randomized_election_timeout())),
-            election_timer: interval(Duration::from_millis(randomized_heartbeat_timeout())),
-        }
+            heartbeat_timer: interval(Duration::from_millis(randomized_heartbeat_timeout())),
+            election_timer: interval(Duration::from_millis(randomized_election_timeout())),
+        };
+
+        node
     }
 
     pub fn reset_election_timer(&mut self) {
@@ -120,13 +123,23 @@ impl RaftNode {
             .ok_or(NodeError::EmptyLog)
     }
 
-    pub async fn run_node(&mut self) {
-        loop {
-            self.election_timer.tick().await;
-            println!("Node {}: Heartbeat timer ticked", self.id);
+    pub fn get_peers(&self) -> &[String] {
+        &self.peers
+    }
 
-            // Handle heartbeat timer and election timer events here
-            self.become_candidate();
-        }
+    pub fn get_id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn get_term(&self) -> u64 {
+        self.current_term
+    }
+
+    pub fn get_voted_for(&self) -> Option<&String> {
+        self.voted_for.as_ref()
+    }
+
+    pub fn set_voted_for(&mut self, candidate_id: Option<String>) {
+        self.voted_for = candidate_id;
     }
 }
