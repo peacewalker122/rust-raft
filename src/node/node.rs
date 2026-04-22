@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use rand::RngExt;
+use tokio::time::{Interval, interval};
 
 use crate::log::log::LogEntry;
 use crate::node::error::NodeError;
@@ -29,15 +31,22 @@ struct RaftNode {
     state: NodeState,
 
     // Hearbeat timer and election timer would be implemented here
-    heartbeat_timer: std::time::Instant,
-    election_timer: std::time::Instant,
+    heartbeat_timer: tokio::time::Interval,
+    election_timer: tokio::time::Interval,
 }
 
-fn randomized_election_timeout() -> std::time::Duration {
+fn randomized_election_timeout() -> u64 {
     let mut rng = rand::rng();
     let timeout_ms = rng.random_range(150..300);
 
-    std::time::Duration::from_millis(timeout_ms)
+    timeout_ms
+}
+
+fn randomized_heartbeat_timeout() -> u64 {
+    let mut rng = rand::rng();
+    let timeout_ms = rng.random_range(50..100);
+
+    timeout_ms
 }
 
 impl RaftNode {
@@ -53,13 +62,13 @@ impl RaftNode {
             next_index: None,
             match_index: None,
             state: NodeState::Follower,
-            heartbeat_timer: std::time::Instant::now(),
-            election_timer: std::time::Instant::now() + randomized_election_timeout(),
+            heartbeat_timer: interval(Duration::from_millis(randomized_election_timeout())),
+            election_timer: interval(Duration::from_millis(randomized_heartbeat_timeout())),
         }
     }
 
     pub fn reset_election_timer(&mut self) {
-        self.election_timer = std::time::Instant::now() + randomized_election_timeout();
+        self.election_timer = interval(Duration::from_millis(randomized_election_timeout()));
     }
 
     // Methods for handling RPCs, state transitions, and log replication would be implemented here
@@ -67,8 +76,9 @@ impl RaftNode {
         self.state = NodeState::Candidate;
         self.current_term += 1;
         self.voted_for = Some(self.id.clone());
+
         // Reset election timer
-        self.election_timer = std::time::Instant::now() + randomized_election_timeout();
+        self.reset_election_timer();
     }
 
     pub fn become_leader(&mut self) -> Result<(), NodeError> {
@@ -93,7 +103,7 @@ impl RaftNode {
         self.current_term = term;
         self.voted_for = None;
         // Reset election timer
-        self.election_timer = std::time::Instant::now() + randomized_election_timeout();
+        self.reset_election_timer();
     }
 
     pub fn last_log_index(&self) -> Result<u64, NodeError> {
@@ -108,5 +118,15 @@ impl RaftNode {
             .last()
             .map(|entry| entry.term)
             .ok_or(NodeError::EmptyLog)
+    }
+
+    pub async fn run_node(&mut self) {
+        loop {
+            self.election_timer.tick().await;
+            println!("Node {}: Heartbeat timer ticked", self.id);
+
+            // Handle heartbeat timer and election timer events here
+            self.become_candidate();
+        }
     }
 }
