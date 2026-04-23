@@ -142,4 +142,8 @@ impl RaftNode {
     pub fn set_voted_for(&mut self, candidate_id: Option<String>) {
         self.voted_for = candidate_id;
     }
+
+    pub fn push_log(&mut self, entry: crate::log::log::LogEntry) {
+        self.log.push(entry);
+    }
 }

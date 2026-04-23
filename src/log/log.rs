@@ -7,6 +7,15 @@ pub struct LogEntry {
 }
 
 impl LogEntry {
+    pub fn new(term: u64, command: impl Into<Vec<u8>>) -> Self {
+        let command = command.into();
+        LogEntry {
+            term,
+            index: 0, // Will be set when appending to log
+            command,
+        }
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         let mut data = vec![];
         data.extend(&self.term.to_le_bytes());

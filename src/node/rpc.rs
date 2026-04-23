@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tonic::{
@@ -27,6 +26,64 @@ impl NodeRpcService {
     pub fn new(node: Arc<tokio::sync::RwLock<RaftNode>>) -> Self {
         NodeRpcService { node }
     }
+
+    async fn request_vote_svc(
+        &self,
+        request: Request<ProtoRequestVoteRequest>,
+    ) -> Result<Response<ProtoRequestVoteResponse>, Status> {
+        // Read values first, drop guard, then write
+        let (mut term, voted_for, node_last_log_index) = {
+            let node = self.node.read().await;
+            (
+                node.get_term(),
+                node.get_voted_for().cloned(),
+                node.last_log_index().unwrap_or(0),
+            )
+        };
+
+        let req = request.get_ref();
+
+        // Raft spec: if candidate's term > current_term, update term
+        if req.term > term {
+            term = req.term;
+        }
+
+        // Reject if candidate's term is stale
+        if req.term < term {
+            return Ok(Response::new(ProtoRequestVoteResponse {
+                success: false,
+                term,
+            }));
+        }
+
+        // Raft spec: grant vote if (votedFor == null OR votedFor == candidateId)
+        // Also check candidate's log is at least as up-to-date
+        let already_voted_for_different = voted_for
+            .as_ref()
+            .map(|v| v.as_str() != req.candidate_id.as_str())
+            .unwrap_or(false);
+
+        // Check log up-to-date: candidate's last index >= node's last index
+        let log_ok = req.last_log_index >= node_last_log_index;
+
+        // Grant vote only if Haven't voted for different AND log is ok
+        if !already_voted_for_different && log_ok {
+            self.node
+                .write()
+                .await
+                .set_voted_for(Some(req.candidate_id.clone()));
+
+            return Ok(Response::new(ProtoRequestVoteResponse {
+                success: true,
+                term,
+            }));
+        }
+
+        Ok(Response::new(ProtoRequestVoteResponse {
+            success: false,
+            term,
+        }))
+    }
 }
 
 // server implementation
@@ -36,37 +93,7 @@ impl RaftRpc for NodeRpcService {
         &self,
         request: Request<ProtoRequestVoteRequest>,
     ) -> Result<Response<ProtoRequestVoteResponse>, Status> {
-        let node = self.node.read().await;
-        let term = node.get_term();
-        let voted_for = node.get_voted_for();
-        let node_last_log_index = node.last_log_index().unwrap_or(0);
-
-        if request.get_ref().term < term {
-            return Ok(Response::new(ProtoRequestVoteResponse {
-                success: false,
-                term,
-            }));
-        }
-
-        if voted_for.is_some()
-            && voted_for.as_deref() != Some(&request.get_ref().candidate_id)
-            && request.get_ref().last_log_index < node_last_log_index
-        {
-            return Ok(Response::new(ProtoRequestVoteResponse {
-                success: false,
-                term,
-            }));
-        }
-
-        self.node
-            .write()
-            .await
-            .set_voted_for(Some(request.get_ref().candidate_id.clone()));
-
-        Ok(Response::new(ProtoRequestVoteResponse {
-            success: true,
-            term,
-        }))
+        return self.request_vote_svc(request).await;
     }
 
     async fn append_entries(
@@ -128,13 +155,8 @@ mod tests {
 
     #[test]
     fn normalize_target_uri_rejects_empty_target() {
-        // Arrange
         let target = "   ";
-
-        // Act
         let result = normalize_target_uri(target);
-
-        // Assert
         assert!(matches!(
             result,
             Err(NodeError::InvalidPeerTarget(value)) if value == "   "
@@ -143,37 +165,28 @@ mod tests {
 
     #[test]
     fn normalize_target_uri_keeps_existing_scheme() {
-        // Arrange
         let target = "https://127.0.0.1:50051";
-
-        // Act
         let result = normalize_target_uri(target).expect("normalize should succeed");
-
-        // Assert
         assert_eq!(result, "https://127.0.0.1:50051");
     }
 
     #[test]
     fn normalize_target_uri_adds_http_scheme_when_missing() {
-        // Arrange
         let target = "127.0.0.1:50051";
-
-        // Act
         let result = normalize_target_uri(target).expect("normalize should succeed");
-
-        // Assert
         assert_eq!(result, "http://127.0.0.1:50051");
     }
 
+    // Tests for request_vote_svc logic (no network involved)
+
     #[tokio::test]
-    async fn request_vote_rejects_when_candidate_term_is_stale() {
-        // Arrange
+    async fn request_vote_svc_rejects_stale_term() {
+        // Node has term 3, candidate has term 2
         let mut node = RaftNode::new("node-1".to_string(), vec![]);
         node.become_follower(3);
         let node = Arc::new(RwLock::new(node));
-        let service = NodeRpcService::new(node.clone());
+        let service = NodeRpcService::new(node);
 
-        // Act
         let response = service
             .request_vote(Request::new(ProtoRequestVoteRequest {
                 term: 2,
@@ -182,22 +195,19 @@ mod tests {
                 last_log_term: 0,
             }))
             .await
-            .expect("request_vote should return response");
+            .expect("should succeed");
 
-        // Assert
         let payload = response.into_inner();
         assert!(!payload.success);
         assert_eq!(payload.term, 3);
-        assert!(node.read().await.get_voted_for().is_none());
     }
 
     #[tokio::test]
-    async fn request_vote_grants_vote_and_sets_voted_for() {
-        // Arrange
+    async fn request_vote_svc_grants_vote_when_not_voted() {
+        // Node has not voted yet, term matches
         let node = Arc::new(RwLock::new(RaftNode::new("node-1".to_string(), vec![])));
         let service = NodeRpcService::new(node.clone());
 
-        // Act
         let response = service
             .request_vote(Request::new(ProtoRequestVoteRequest {
                 term: 0,
@@ -206,9 +216,8 @@ mod tests {
                 last_log_term: 0,
             }))
             .await
-            .expect("request_vote should return response");
+            .expect("should succeed");
 
-        // Assert
         let payload = response.into_inner();
         assert!(payload.success);
         assert_eq!(payload.term, 0);
@@ -219,12 +228,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_vote_svc_rejects_already_voted_different_candidate() {
+        // Node already voted for different candidate
+        let mut node = RaftNode::new("node-1".to_string(), vec![]);
+        node.become_follower(1);
+        node.set_voted_for(Some("other-candidate".to_string()));
+
+        let node = Arc::new(RwLock::new(node));
+        let service = NodeRpcService::new(node.clone());
+
+        let response = service
+            .request_vote(Request::new(ProtoRequestVoteRequest {
+                term: 1,
+                candidate_id: "new-candidate".to_string(),
+                last_log_index: 0,
+                last_log_term: 0,
+            }))
+            .await
+            .expect("should succeed");
+
+        let payload = response.into_inner();
+        assert!(!payload.success);
+        assert_eq!(payload.term, 1);
+        // voted_for unchanged
+        assert_eq!(
+            node.read().await.get_voted_for().map(|v| v.as_str()),
+            Some("other-candidate")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_vote_svc_accepts_same_candidate_again() {
+        // Node already voted for same candidate - should still grant
+        let mut node = RaftNode::new("node-1".to_string(), vec![]);
+        node.become_follower(1);
+        node.set_voted_for(Some("same-candidate".to_string()));
+
+        let node = Arc::new(RwLock::new(node));
+        let service = NodeRpcService::new(node.clone());
+
+        let response = service
+            .request_vote(Request::new(ProtoRequestVoteRequest {
+                term: 2, // higher term
+                candidate_id: "same-candidate".to_string(),
+                last_log_index: 5,
+                last_log_term: 1,
+            }))
+            .await
+            .expect("should succeed");
+
+        let payload = response.into_inner();
+        assert!(payload.success);
+        assert_eq!(payload.term, 2);
+    }
+
+    #[tokio::test]
     async fn append_entries_returns_success_true() {
-        // Arrange
         let node = Arc::new(RwLock::new(RaftNode::new("node-1".to_string(), vec![])));
         let service = NodeRpcService::new(node);
 
-        // Act
         let response = service
             .append_entries(Request::new(ProtoAppendEntriesRequest {
                 term: 1,
@@ -235,9 +297,8 @@ mod tests {
                 leader_commit: 0,
             }))
             .await
-            .expect("append_entries should return response");
+            .expect("should succeed");
 
-        // Assert
         assert!(response.into_inner().success);
     }
 }
