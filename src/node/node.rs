@@ -26,8 +26,8 @@ pub struct RaftNode {
     commit_index: u64,
     last_applied: u64,
 
-    next_index: Option<HashMap<String, u64>>,
-    match_index: Option<HashMap<String, u64>>,
+    next_index: Option<HashMap<String, u64>>, // Only used by leader to track next log index to send to each follower
+    match_index: Option<HashMap<String, u64>>, // Only used by leader to track replication status of followers
 
     state: NodeState,
 
@@ -145,5 +145,13 @@ impl RaftNode {
 
     pub fn push_log(&mut self, entry: crate::log::log::LogEntry) {
         self.log.push(entry);
+    }
+
+    pub fn get_min_majority_vote(&self) -> u64 {
+        (self.peers.len() as u64).div_ceil(2) + 1
+    }
+
+    pub fn is_leader(&self) -> bool {
+        matches!(self.state, NodeState::Leader)
     }
 }

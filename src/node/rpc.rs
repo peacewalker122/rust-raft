@@ -110,12 +110,12 @@ pub async fn send_request_vote(
     candidate_id: &str,
     last_log_index: u64,
     last_log_term: u64,
-) -> Result<(), NodeError> {
+) -> Result<Response<ProtoRequestVoteResponse>, NodeError> {
     let endpoint = normalize_target_uri(target)?;
     let channel = Endpoint::from_shared(endpoint)?.connect().await?;
     let mut client = RaftRpcClient::new(channel);
 
-    client
+    let res = client
         .request_vote(Request::new(ProtoRequestVoteRequest {
             term,
             candidate_id: candidate_id.to_string(),
@@ -125,7 +125,31 @@ pub async fn send_request_vote(
         .await
         .map_err(|e| NodeError::RequestVoteFailed(e.to_string()))?;
 
-    Ok(())
+    Ok(res)
+}
+
+pub async fn send_append_entries(
+    target: &str,
+    term: u64,
+    leader_id: &str,
+) -> Result<Response<ProtoAppendEntriesResponse>, NodeError> {
+    let endpoint = normalize_target_uri(target)?;
+    let channel = Endpoint::from_shared(endpoint)?.connect().await?;
+    let mut client = RaftRpcClient::new(channel);
+
+    let res = client
+        .append_entries(Request::new(ProtoAppendEntriesRequest {
+            term,
+            leader_id: leader_id.to_string(),
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: Vec::new(),
+            leader_commit: 0,
+        }))
+        .await
+        .map_err(|e| NodeError::AppendEntriesFailed(e.to_string()))?;
+
+    Ok(res)
 }
 
 fn normalize_target_uri(target: &str) -> Result<String, NodeError> {
