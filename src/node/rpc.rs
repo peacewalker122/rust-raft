@@ -16,7 +16,7 @@ use proto::{
     AppendEntriesRequest as ProtoAppendEntriesRequest,
     AppendEntriesResponse as ProtoAppendEntriesResponse,
     RequestVoteRequest as ProtoRequestVoteRequest, RequestVoteResponse as ProtoRequestVoteResponse,
-    raft_rpc_client::RaftRpcClient, raft_rpc_server::RaftRpc, raft_rpc_server::RaftRpcServer,
+    raft_rpc_client::RaftRpcClient, raft_rpc_server::RaftRpc,
 };
 
 pub struct NodeRpcService {
@@ -36,15 +36,26 @@ impl RaftRpc for NodeRpcService {
         &self,
         request: Request<ProtoRequestVoteRequest>,
     ) -> Result<Response<ProtoRequestVoteResponse>, Status> {
-        if request.get_ref().term < self.node.read().await.get_term() {
-            return Ok(Response::new(ProtoRequestVoteResponse { success: false }));
+        let node = self.node.read().await;
+        let term = node.get_term();
+        let voted_for = node.get_voted_for();
+        let node_last_log_index = node.last_log_index().unwrap_or(0);
+
+        if request.get_ref().term < term {
+            return Ok(Response::new(ProtoRequestVoteResponse {
+                success: false,
+                term,
+            }));
         }
 
-        let node = self.node.read().await;
-        let voted_for = node.get_voted_for();
-
-        if voted_for.is_some() && voted_for.as_deref() != Some(&request.get_ref().candidate_id) {
-            return Ok(Response::new(ProtoRequestVoteResponse { success: false }));
+        if voted_for.is_some()
+            && voted_for.as_deref() != Some(&request.get_ref().candidate_id)
+            && request.get_ref().last_log_index < node_last_log_index
+        {
+            return Ok(Response::new(ProtoRequestVoteResponse {
+                success: false,
+                term,
+            }));
         }
 
         self.node
@@ -52,7 +63,10 @@ impl RaftRpc for NodeRpcService {
             .await
             .set_voted_for(Some(request.get_ref().candidate_id.clone()));
 
-        Ok(Response::new(ProtoRequestVoteResponse { success: true }))
+        Ok(Response::new(ProtoRequestVoteResponse {
+            success: true,
+            term,
+        }))
     }
 
     async fn append_entries(
@@ -67,6 +81,8 @@ pub async fn send_request_vote(
     target: &str,
     term: u64,
     candidate_id: &str,
+    last_log_index: u64,
+    last_log_term: u64,
 ) -> Result<(), NodeError> {
     let endpoint = normalize_target_uri(target)?;
     let channel = Endpoint::from_shared(endpoint)?.connect().await?;
@@ -76,6 +92,8 @@ pub async fn send_request_vote(
         .request_vote(Request::new(ProtoRequestVoteRequest {
             term,
             candidate_id: candidate_id.to_string(),
+            last_log_index,
+            last_log_term,
         }))
         .await
         .map_err(|e| NodeError::RequestVoteFailed(e.to_string()))?;

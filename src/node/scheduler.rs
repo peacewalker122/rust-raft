@@ -12,12 +12,17 @@ impl NodeScheduler {
     }
 
     async fn send_request_vote(&self, peer: &str) -> Result<(), NodeError> {
-        let (term, id) = {
+        let (term, id, last_log_idx, last_log_term) = {
             let node = self.node.read().await;
-            (node.get_term(), node.id.clone())
+            (
+                node.get_term(),
+                node.id.clone(),
+                node.last_log_index().unwrap_or(0),
+                node.last_log_term().unwrap_or(0),
+            )
         };
 
-        rpc::send_request_vote(peer, term, &id).await
+        rpc::send_request_vote(peer, term, &id, last_log_idx, last_log_term).await
     }
 
     pub async fn start(&self) {
