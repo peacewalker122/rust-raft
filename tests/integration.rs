@@ -12,6 +12,8 @@ use rust_raft::node::{
     rpc::{NodeRpcService, proto::raft_rpc_server::RaftRpcServer},
     scheduler::NodeScheduler,
 };
+use rust_raft::storage::MockStore;
+use rust_raft::storage::api::Store;
 use tokio::sync::RwLock;
 use tonic::transport::Server;
 
@@ -29,7 +31,11 @@ async fn start_node_server(
         .parse()
         .expect("invalid socket address");
 
-    let shared_node = Arc::new(RwLock::new(RaftNode::new(node_id.clone(), peers.clone())));
+    let shared_node = Arc::new(RwLock::new(RaftNode::new(
+        node_id.clone(),
+        peers.clone(),
+        Box::new(MockStore::new()),
+    )));
     let node_for_server = shared_node.clone();
     let node_for_scheduler = shared_node.clone();
 
@@ -227,7 +233,11 @@ async fn test_request_vote_rpc_between_nodes() {
     let addr_a = "127.0.0.1:50131";
 
     // Start server without scheduler for this test (no election timer interference)
-    let shared_node = Arc::new(RwLock::new(RaftNode::new("voter".to_string(), vec![])));
+    let shared_node = Arc::new(RwLock::new(RaftNode::new(
+        "voter".to_string(),
+        vec![],
+        Box::new(MockStore::new()),
+    )));
     let node_for_server = shared_node.clone();
 
     let server_handle = tokio::spawn(async move {
@@ -265,4 +275,3 @@ async fn test_request_vote_rpc_between_nodes() {
     // Cleanup
     server_handle.abort();
 }
-
