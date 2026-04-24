@@ -9,6 +9,9 @@ pub enum StorageError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    #[error("I/O error: {0}")]
+    IoError(String),
+
     #[error(transparent)]
     Log(#[from] LogError),
 

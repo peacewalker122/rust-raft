@@ -6,7 +6,7 @@ use tokio::time::interval;
 
 use crate::log::log::LogEntry;
 use crate::node::error::NodeError;
-use crate::node::rpc;
+use crate::storage::api::Store;
 
 #[derive(Debug)]
 enum NodeState {
@@ -19,9 +19,9 @@ pub struct RaftNode {
     pub id: String,
     peers: Vec<String>,
 
-    current_term: u64,
-    voted_for: Option<String>,
-    log: Vec<LogEntry>,
+    pub current_term: u64,
+    pub voted_for: Option<String>,
+    pub log: Vec<LogEntry>,
 
     commit_index: u64,
     last_applied: u64,
@@ -34,6 +34,8 @@ pub struct RaftNode {
     // Hearbeat timer and election timer would be implemented here
     pub heartbeat_timer: tokio::time::Interval,
     pub election_timer: tokio::time::Interval,
+
+    storage: Box<dyn Store>,
 }
 
 fn randomized_election_timeout() -> u64 {
@@ -51,7 +53,8 @@ fn randomized_heartbeat_timeout() -> u64 {
 }
 
 impl RaftNode {
-    pub fn new(id: String, peers: Vec<String>) -> Self {
+    pub fn new(id: String, peers: Vec<String>, storage: Box<dyn Store>) -> Self {
+        // Initialize with defaults - load() should be called after to recover state
         RaftNode {
             id,
             peers,
@@ -65,7 +68,26 @@ impl RaftNode {
             state: NodeState::Follower,
             heartbeat_timer: interval(Duration::from_millis(randomized_heartbeat_timeout())),
             election_timer: interval(Duration::from_millis(randomized_election_timeout())),
+            storage,
         }
+    }
+
+    /// Create a new node and load persisted state from storage
+    pub async fn new_with_persistence(
+        id: String,
+        peers: Vec<String>,
+        storage: Box<dyn Store>,
+    ) -> Result<Self, NodeError> {
+        let mut node = Self::new(id, peers, storage);
+
+        // Load persisted state
+        if let Ok(state) = node.storage.load().await {
+            node.current_term = state.current_term;
+            node.voted_for = state.voted_for;
+            // Note: log loading would go here too
+        }
+
+        Ok(node)
     }
 
     pub fn reset_election_timer(&mut self) {
@@ -73,13 +95,21 @@ impl RaftNode {
     }
 
     // Methods for handling RPCs, state transitions, and log replication would be implemented here
-    pub fn become_candidate(&mut self) {
+    pub async fn become_candidate(&mut self) -> Result<(), NodeError> {
         self.state = NodeState::Candidate;
         self.current_term += 1;
         self.voted_for = Some(self.id.clone());
 
+        // Persist both term and voted_for
+        self.storage.update_term(self.current_term).await?;
+        self.storage
+            .update_voted_for(self.voted_for.clone())
+            .await?;
+
         // Reset election timer
         self.reset_election_timer();
+
+        Ok(())
     }
 
     pub fn become_leader(&mut self) -> Result<(), NodeError> {
@@ -137,8 +167,13 @@ impl RaftNode {
         self.voted_for.as_ref()
     }
 
-    pub fn set_voted_for(&mut self, candidate_id: Option<String>) {
+    pub async fn set_voted_for(&mut self, candidate_id: Option<String>) -> Result<(), NodeError> {
         self.voted_for = candidate_id;
+        self.storage
+            .update_voted_for(self.voted_for.clone())
+            .await?;
+
+        Ok(())
     }
 
     pub fn push_log(&mut self, entry: crate::log::log::LogEntry) {
@@ -153,3 +188,4 @@ impl RaftNode {
         matches!(self.state, NodeState::Leader)
     }
 }
+

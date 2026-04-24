@@ -71,7 +71,9 @@ impl NodeRpcService {
             self.node
                 .write()
                 .await
-                .set_voted_for(Some(req.candidate_id.clone()));
+                .set_voted_for(Some(req.candidate_id.clone()))
+                .await
+                .map_err(|err| Status::internal(format!("failed to update voted_for: {err}")))?;
 
             return Ok(Response::new(ProtoRequestVoteResponse {
                 success: true,
@@ -181,6 +183,7 @@ mod tests {
         proto::AppendEntriesRequest as ProtoAppendEntriesRequest,
     };
     use crate::node::{error::NodeError, node::RaftNode};
+    use crate::storage::MockStore;
 
     #[test]
     fn normalize_target_uri_rejects_empty_target() {
@@ -211,7 +214,7 @@ mod tests {
     #[tokio::test]
     async fn request_vote_svc_rejects_stale_term() {
         // Node has term 3, candidate has term 2
-        let mut node = RaftNode::new("node-1".to_string(), vec![]);
+        let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
         node.become_follower(3);
         let node = Arc::new(RwLock::new(node));
         let service = NodeRpcService::new(node);
@@ -234,7 +237,11 @@ mod tests {
     #[tokio::test]
     async fn request_vote_svc_grants_vote_when_not_voted() {
         // Node has not voted yet, term matches
-        let node = Arc::new(RwLock::new(RaftNode::new("node-1".to_string(), vec![])));
+        let node = Arc::new(RwLock::new(RaftNode::new(
+            "node-1".to_string(),
+            vec![],
+            Box::new(MockStore::new()),
+        )));
         let service = NodeRpcService::new(node.clone());
 
         let response = service
@@ -259,9 +266,12 @@ mod tests {
     #[tokio::test]
     async fn request_vote_svc_rejects_already_voted_different_candidate() {
         // Node already voted for different candidate
-        let mut node = RaftNode::new("node-1".to_string(), vec![]);
+        let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
         node.become_follower(1);
-        node.set_voted_for(Some("other-candidate".to_string()));
+
+        node.set_voted_for(Some("other-candidate".to_string()))
+            .await
+            .expect("should set voted_for");
 
         let node = Arc::new(RwLock::new(node));
         let service = NodeRpcService::new(node.clone());
@@ -289,7 +299,7 @@ mod tests {
     #[tokio::test]
     async fn request_vote_svc_accepts_same_candidate_again() {
         // Node already voted for same candidate - should still grant
-        let mut node = RaftNode::new("node-1".to_string(), vec![]);
+        let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
         node.become_follower(1);
         node.set_voted_for(Some("same-candidate".to_string()));
 
@@ -313,7 +323,11 @@ mod tests {
 
     #[tokio::test]
     async fn append_entries_returns_success_true() {
-        let node = Arc::new(RwLock::new(RaftNode::new("node-1".to_string(), vec![])));
+        let node = Arc::new(RwLock::new(RaftNode::new(
+            "node-1".to_string(),
+            vec![],
+            Box::new(MockStore::new()),
+        )));
         let service = NodeRpcService::new(node);
 
         let response = service

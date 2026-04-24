@@ -1,5 +1,6 @@
 use crate::log::error::LogError;
 
+#[derive(Clone)]
 pub struct LogEntry {
     pub term: u64,
     pub index: u64,

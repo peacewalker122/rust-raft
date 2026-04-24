@@ -93,7 +93,10 @@ impl NodeScheduler {
         // 1. Become candidate ( acquire lock briefly)
         {
             let mut node = self.node.write().await;
-            node.become_candidate();
+            node.become_candidate()
+                .await
+                .expect("Failed to become candidate (should not fail)");
+
             println!(
                 "Node {} started election for term {}",
                 node.get_id(),
