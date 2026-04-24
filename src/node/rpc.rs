@@ -93,6 +93,11 @@ impl RaftRpc for NodeRpcService {
         &self,
         request: Request<ProtoRequestVoteRequest>,
     ) -> Result<Response<ProtoRequestVoteResponse>, Status> {
+        println!(
+            "Received RequestVote from {}",
+            request.get_ref().candidate_id
+        );
+
         return self.request_vote_svc(request).await;
     }
 

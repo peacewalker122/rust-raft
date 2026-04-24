@@ -52,7 +52,7 @@ fn randomized_heartbeat_timeout() -> u64 {
 
 impl RaftNode {
     pub fn new(id: String, peers: Vec<String>) -> Self {
-        let mut node = RaftNode {
+        RaftNode {
             id,
             peers,
             current_term: 0,
@@ -65,9 +65,7 @@ impl RaftNode {
             state: NodeState::Follower,
             heartbeat_timer: interval(Duration::from_millis(randomized_heartbeat_timeout())),
             election_timer: interval(Duration::from_millis(randomized_election_timeout())),
-        };
-
-        node
+        }
     }
 
     pub fn reset_election_timer(&mut self) {

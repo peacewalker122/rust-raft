@@ -111,6 +111,7 @@ impl NodeScheduler {
         for peer in peers {
             match self.send_request_vote(&peer).await {
                 Ok(resp) => {
+                    println!("Received response from {}: {:?}", peer, resp);
                     if resp.into_inner().success {
                         println!("Received vote from {}", peer);
                         votes_received += 1;
@@ -118,6 +119,10 @@ impl NodeScheduler {
                 }
                 Err(error) => println!("Failed to request vote from {}: {}", peer, error),
             }
+        }
+
+        if votes_received == 1 {
+            return;
         }
 
         // 3. Check if won (brief lock)
@@ -195,4 +200,3 @@ impl NodeScheduler {
         }
     }
 }
-
