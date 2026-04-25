@@ -126,7 +126,7 @@ impl NodeRpcService {
 
         // Step 3: Check log matching - reject if no entry at prevLogIndex with prevLogTerm
         let prev_log_matches = if req.prev_log_index == 0 {
-            req.prev_log_term == 01292
+            req.prev_log_term == 0
         } else if req.prev_log_index > node_last_log_index {
             false
         } else {

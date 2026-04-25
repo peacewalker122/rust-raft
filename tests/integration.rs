@@ -195,6 +195,7 @@ async fn test_candidate_requests_votes() {
 async fn test_leader_election_consensus() {
     let addr_a = "127.0.0.1:50121";
     let addr_b = "127.0.0.1:50122";
+    let addr_c = "127.0.0.1:50123";
 
     let (_, node_a, handles_a) =
         start_node_server("consensus-a".to_string(), vec![addr_b.to_string()], 50121).await;
@@ -202,11 +203,19 @@ async fn test_leader_election_consensus() {
     let (_, node_b, handles_b) =
         start_node_server("consensus-b".to_string(), vec![addr_a.to_string()], 50122).await;
 
+    let (_, node_c, handles_c) = start_node_server(
+        "consensus-c".to_string(),
+        vec![addr_a.to_string(), addr_b.to_string()],
+        50123,
+    )
+    .await;
+
     // Wait longer for stable election
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let term_a = node_a.read().await.get_term();
     let term_b = node_b.read().await.get_term();
+    let _ = node_c.read().await.get_term();
 
     println!("Final terms - A: {}, B: {}", term_a, term_b);
 
