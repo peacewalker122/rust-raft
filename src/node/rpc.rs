@@ -87,26 +87,15 @@ impl NodeRpcService {
         }))
     }
 
-    // Implementation of append_entries RPC handler per Raft spec:
-    // 1. Reply false if term < currentTerm
-    // 2. If leader's term >= currentTerm, become follower
-    // 3. If log doesn't contain entry at prevLogIndex with prevLogTerm, reject
-    // 4. If existing entry conflicts (same index, different term), delete it and all that follow
-    // 5. Append any new entries not already in log
-    // 6. If leaderCommit > commitIndex, set commitIndex = leaderCommit
     async fn append_entries_svc(
         &self,
         request: Request<ProtoAppendEntriesRequest>,
     ) -> Result<Response<ProtoAppendEntriesResponse>, Status> {
         let req = request.into_inner();
 
-        let (mut term, node_last_log_index, node_last_log_term) = {
+        let (mut term, node_log_len) = {
             let node = self.node.read().await;
-            (
-                node.get_term(),
-                node.last_log_index().unwrap_or(0),
-                node.last_log_term().unwrap_or(0),
-            )
+            (node.get_term(), node.log.len() as u64)
         };
 
         // Step 1: Reply false if term < currentTerm
@@ -127,7 +116,7 @@ impl NodeRpcService {
         // Step 3: Check log matching - reject if no entry at prevLogIndex with prevLogTerm
         let prev_log_matches = if req.prev_log_index == 0 {
             req.prev_log_term == 0
-        } else if req.prev_log_index > node_last_log_index {
+        } else if req.prev_log_index > node_log_len {
             false
         } else {
             let node = self.node.read().await;
@@ -274,7 +263,7 @@ mod tests {
 
     use super::{
         NodeRpcService, ProtoRequestVoteRequest, RaftRpc, normalize_target_uri,
-        proto::AppendEntriesRequest as ProtoAppendEntriesRequest,
+        proto::{AppendEntriesRequest as ProtoAppendEntriesRequest, LogEntry as ProtoLogEntry},
     };
     use crate::node::{error::NodeError, node::RaftNode};
     use crate::storage::MockStore;
@@ -437,5 +426,192 @@ mod tests {
             .expect("should succeed");
 
         assert!(response.into_inner().success);
+    }
+
+    #[tokio::test]
+    async fn append_entries_rejects_stale_term() {
+        // Node has term 3, leader has term 2
+        let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
+        node.become_follower(3);
+        let node = Arc::new(RwLock::new(node));
+        let service = NodeRpcService::new(node);
+
+        let response = service
+            .append_entries(Request::new(ProtoAppendEntriesRequest {
+                term: 2,
+                leader_id: "leader-1".to_string(),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: Vec::new(),
+                leader_commit: 0,
+            }))
+            .await
+            .expect("should succeed");
+
+        let payload = response.into_inner();
+        assert!(!payload.success);
+        assert_eq!(payload.term, 3);
+    }
+
+    #[tokio::test]
+    async fn append_entries_updates_term_and_becomes_follower() {
+        // Leader has higher term, node should update and become follower
+        let node = Arc::new(RwLock::new(RaftNode::new(
+            "node-1".to_string(),
+            vec![],
+            Box::new(MockStore::new()),
+        )));
+        let service = NodeRpcService::new(node);
+
+        let response = service
+            .append_entries(Request::new(ProtoAppendEntriesRequest {
+                term: 5,
+                leader_id: "leader-1".to_string(),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: Vec::new(),
+                leader_commit: 0,
+            }))
+            .await
+            .expect("should succeed");
+
+        let payload = response.into_inner();
+        assert!(payload.success);
+        assert_eq!(payload.term, 5);
+    }
+
+    #[tokio::test]
+    async fn append_entries_appends_entries_to_log() {
+        let node = Arc::new(RwLock::new(RaftNode::new(
+            "node-1".to_string(),
+            vec![],
+            Box::new(MockStore::new()),
+        )));
+        let service = NodeRpcService::new(node.clone());
+
+        let response = service
+            .append_entries(Request::new(ProtoAppendEntriesRequest {
+                term: 1,
+                leader_id: "leader-1".to_string(),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: vec![
+                    ProtoLogEntry {
+                        term: 1,
+                        index: 1,
+                        command: b"command1".to_vec(),
+                    },
+                    ProtoLogEntry {
+                        term: 1,
+                        index: 2,
+                        command: b"command2".to_vec(),
+                    },
+                ],
+                leader_commit: 0,
+            }))
+            .await
+            .expect("should succeed");
+
+        assert!(response.into_inner().success);
+        let node = node.read().await;
+        assert_eq!(node.log.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn append_entries_rejects_mismatched_prev_log() {
+        // Node has entry at index 1 with term 1, but leader says prev_log_term 2
+        let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
+        node.push_log(crate::log::log::LogEntry::new(1, b"old cmd"));
+        let node = Arc::new(RwLock::new(node));
+        let service = NodeRpcService::new(node.clone());
+
+        let response = service
+            .append_entries(Request::new(ProtoAppendEntriesRequest {
+                term: 1,
+                leader_id: "leader-1".to_string(),
+                prev_log_index: 1,
+                prev_log_term: 2, // Mismatched - entry has term 1
+                entries: vec![ProtoLogEntry {
+                    term: 1,
+                    index: 2,
+                    command: b"new cmd".to_vec(),
+                }],
+                leader_commit: 0,
+            }))
+            .await
+            .expect("should succeed");
+
+        let payload = response.into_inner();
+        assert!(!payload.success);
+        // Log should not have been appended
+        let node = node.read().await;
+        assert_eq!(node.log.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn append_entries_truncates_conflicting_entries() {
+        // Node has entries [1, 2], leader wants to replace from index 1
+        let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
+        node.push_log(crate::log::log::LogEntry::new(1, b"cmd1"));
+        node.push_log(crate::log::log::LogEntry::new(1, b"cmd2"));
+        let node = Arc::new(RwLock::new(node));
+        let service = NodeRpcService::new(node.clone());
+
+        let response = service
+            .append_entries(Request::new(ProtoAppendEntriesRequest {
+                term: 2,
+                leader_id: "leader-1".to_string(),
+                prev_log_index: 1,
+                prev_log_term: 1,
+                entries: vec![ProtoLogEntry {
+                    term: 2,
+                    index: 2,
+                    command: b"new_cmd2".to_vec(),
+                }],
+                leader_commit: 0,
+            }))
+            .await
+            .expect("should succeed");
+
+        assert!(response.into_inner().success);
+        let node = node.read().await;
+        assert_eq!(node.log.len(), 2);
+        assert_eq!(node.log[1].term, 2); // Replaced with new term
+    }
+
+    #[tokio::test]
+    async fn append_entries_updates_commit_index() {
+        let node = Arc::new(RwLock::new(RaftNode::new(
+            "node-1".to_string(),
+            vec![],
+            Box::new(MockStore::new()),
+        )));
+        let service = NodeRpcService::new(node.clone());
+
+        service
+            .append_entries(Request::new(ProtoAppendEntriesRequest {
+                term: 1,
+                leader_id: "leader-1".to_string(),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: vec![
+                    ProtoLogEntry {
+                        term: 1,
+                        index: 1,
+                        command: b"cmd1".to_vec(),
+                    },
+                    ProtoLogEntry {
+                        term: 1,
+                        index: 2,
+                        command: b"cmd2".to_vec(),
+                    },
+                ],
+                leader_commit: 2, // Leader committed up to index 2
+            }))
+            .await
+            .expect("should succeed");
+
+        let node = node.read().await;
+        assert_eq!(node.get_commit_index(), 2);
     }
 }
