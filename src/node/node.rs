@@ -187,5 +187,12 @@ impl RaftNode {
     pub fn is_leader(&self) -> bool {
         matches!(self.state, NodeState::Leader)
     }
-}
 
+    pub fn get_commit_index(&self) -> u64 {
+        self.commit_index
+    }
+
+    pub fn set_commit_index(&mut self, index: u64) {
+        self.commit_index = index;
+    }
+}

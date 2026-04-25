@@ -48,7 +48,7 @@ impl NodeRpcService {
             term = req.term;
         }
 
-        // Reject if candidate's term is stale
+        // Reject if candidate's term is staleand the request if th
         if req.term < term {
             return Ok(Response::new(ProtoRequestVoteResponse {
                 success: false,
@@ -86,11 +86,100 @@ impl NodeRpcService {
             term,
         }))
     }
+
+    // Implementation of append_entries RPC handler per Raft spec:
+    // 1. Reply false if term < currentTerm
+    // 2. If leader's term >= currentTerm, become follower
+    // 3. If log doesn't contain entry at prevLogIndex with prevLogTerm, reject
+    // 4. If existing entry conflicts (same index, different term), delete it and all that follow
+    // 5. Append any new entries not already in log
+    // 6. If leaderCommit > commitIndex, set commitIndex = leaderCommit
+    async fn append_entries_svc(
+        &self,
+        request: Request<ProtoAppendEntriesRequest>,
+    ) -> Result<Response<ProtoAppendEntriesResponse>, Status> {
+        let req = request.into_inner();
+
+        let (mut term, node_last_log_index, node_last_log_term) = {
+            let node = self.node.read().await;
+            (
+                node.get_term(),
+                node.last_log_index().unwrap_or(0),
+                node.last_log_term().unwrap_or(0),
+            )
+        };
+
+        // Step 1: Reply false if term < currentTerm
+        if req.term < term {
+            return Ok(Response::new(ProtoAppendEntriesResponse {
+                success: false,
+                term,
+            }));
+        }
+
+        // Step 2: Update term and become follower if leader's term > currentTerm
+        if req.term > term {
+            term = req.term;
+            let mut node = self.node.write().await;
+            node.become_follower(term);
+        }
+
+        // Step 3: Check log matching - reject if no entry at prevLogIndex with prevLogTerm
+        let prev_log_matches = if req.prev_log_index == 0 {
+            req.prev_log_term == 01292
+        } else if req.prev_log_index > node_last_log_index {
+            false
+        } else {
+            let node = self.node.read().await;
+            let entry_at_prev = node.log.get((req.prev_log_index - 1) as usize);
+            match entry_at_prev {
+                Some(entry) => entry.term == req.prev_log_term,
+                None => false,
+            }
+        };
+
+        if !prev_log_matches {
+            return Ok(Response::new(ProtoAppendEntriesResponse {
+                success: false,
+                term,
+            }));
+        }
+
+        // Step 4 & 5: Handle log consistency and append new entries
+        // Remove conflicting entries and append new ones
+        let mut node = self.node.write().await;
+        let log_len = node.log.len() as u64;
+
+        // Truncate log at conflict point (entries after prev_log_index)
+        if req.prev_log_index < log_len {
+            let truncate_count = (log_len - req.prev_log_index) as usize;
+            node.log.truncate(req.prev_log_index as usize);
+        }
+
+        // Append new entries not already in log
+        for proto_entry in req.entries {
+            let new_entry = crate::log::log::LogEntry::new(proto_entry.term, proto_entry.command);
+            node.log.push(new_entry);
+        }
+
+        // Step 6: Update commit index if leader committed more
+        let current_commit = node.get_commit_index();
+        let new_commit_index = req.leader_commit.min(node.log.len() as u64);
+        if new_commit_index > current_commit {
+            node.set_commit_index(new_commit_index);
+        }
+
+        Ok(Response::new(ProtoAppendEntriesResponse {
+            success: true,
+            term,
+        }))
+    }
 }
 
 // server implementation
 #[tonic::async_trait]
 impl RaftRpc for NodeRpcService {
+    // For simplicity, just return success=true for now
     async fn request_vote(
         &self,
         request: Request<ProtoRequestVoteRequest>,
@@ -105,9 +194,14 @@ impl RaftRpc for NodeRpcService {
 
     async fn append_entries(
         &self,
-        _request: Request<ProtoAppendEntriesRequest>,
+        request: Request<ProtoAppendEntriesRequest>,
     ) -> Result<Response<ProtoAppendEntriesResponse>, Status> {
-        Ok(Response::new(ProtoAppendEntriesResponse { success: true }))
+        println!(
+            "Received AppendEntries from {}",
+            request.get_ref().leader_id
+        );
+
+        self.append_entries_svc(request).await
     }
 }
 
