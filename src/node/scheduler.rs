@@ -124,10 +124,6 @@ impl NodeScheduler {
             }
         }
 
-        if votes_received == 1 {
-            return;
-        }
-
         // 3. Check if won (brief lock)
         let election_won = {
             let node = self.node.read().await;

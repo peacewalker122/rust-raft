@@ -13,7 +13,6 @@ use rust_raft::node::{
     scheduler::NodeScheduler,
 };
 use rust_raft::storage::MockStore;
-use rust_raft::storage::api::Store;
 use tokio::sync::RwLock;
 use tonic::transport::Server;
 

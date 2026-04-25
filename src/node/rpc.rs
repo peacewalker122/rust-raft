@@ -46,6 +46,13 @@ impl NodeRpcService {
         // Raft spec: if candidate's term > current_term, update term
         if req.term > term {
             term = req.term;
+            // Persist term before responding (Raft spec: must persist before replying)
+            {
+                let mut node = self.node.write().await;
+                node.set_term(term)
+                    .await
+                    .map_err(|err| Status::internal(format!("failed to persist term: {err}")))?;
+            }
         }
 
         // Reject if candidate's term is staleand the request if th
@@ -157,6 +164,11 @@ impl NodeRpcService {
         if new_commit_index > current_commit {
             node.set_commit_index(new_commit_index);
         }
+
+        // Persist state before responding (Raft spec: must persist before replying)
+        node.persist()
+            .await
+            .map_err(|err| Status::internal(format!("failed to persist log: {err}")))?;
 
         Ok(Response::new(ProtoAppendEntriesResponse {
             success: true,

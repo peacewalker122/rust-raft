@@ -163,6 +163,12 @@ impl RaftNode {
         self.current_term
     }
 
+    pub async fn set_term(&mut self, term: u64) -> Result<(), NodeError> {
+        self.current_term = term;
+        self.storage.update_term(self.current_term).await?;
+        Ok(())
+    }
+
     pub fn get_voted_for(&self) -> Option<&String> {
         self.voted_for.as_ref()
     }
@@ -178,6 +184,17 @@ impl RaftNode {
 
     pub fn push_log(&mut self, entry: crate::log::log::LogEntry) {
         self.log.push(entry);
+    }
+
+    /// Persist the entire node state to storage
+    pub async fn persist(&mut self) -> Result<(), NodeError> {
+        let state = crate::storage::storage::PersistentState {
+            current_term: self.current_term,
+            voted_for: self.voted_for.clone(),
+            log: self.log.clone(),
+        };
+        self.storage.save(state).await?;
+        Ok(())
     }
 
     pub fn get_min_majority_vote(&self) -> u64 {
