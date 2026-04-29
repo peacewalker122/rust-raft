@@ -31,6 +31,9 @@ pub enum NodeError {
     #[error("append_entries failed: {0}")]
     AppendEntriesFailed(String),
 
+    #[error("install_snapshot failed: {0}")]
+    InstallSnapshotFailed(String),
+
     #[error("internal server error: {0}")]
     InternalServerError(String),
 }

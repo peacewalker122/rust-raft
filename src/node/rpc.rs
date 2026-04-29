@@ -11,6 +11,8 @@ pub mod proto {
 use proto::{
     AppendEntriesRequest as ProtoAppendEntriesRequest,
     AppendEntriesResponse as ProtoAppendEntriesResponse,
+    InstallSnapshotRequest as ProtoInstallSnapshotRequest,
+    InstallSnapshotResponse as ProtoInstallSnapshotResponse,
     RequestVoteRequest as ProtoRequestVoteRequest, RequestVoteResponse as ProtoRequestVoteResponse,
     raft_rpc_client::RaftRpcClient, raft_rpc_server::RaftRpc,
 };
@@ -172,33 +174,31 @@ impl NodeRpcService {
         }))
     }
 
-    async fn install_snapshot(
+    async fn install_snapshot_svc(
         &self,
-        request: Request<proto::InstallSnapshotRequest>,
-    ) -> Result<Response<proto::InstallSnapshotResponse>, Status> {
+        request: Request<ProtoInstallSnapshotRequest>,
+    ) -> Result<Response<ProtoInstallSnapshotResponse>, Status> {
         let req = request.into_inner();
 
-        let (mut term, node_log_len) = {
+        let mut term = {
             let node = self.node.read().await;
-            (node.get_term(), node.log.len() as u64)
+            node.get_term()
         };
 
         // Step 1: Reply false if term < currentTerm
         if req.term < term {
-            return Ok(Response::new(proto::InstallSnapshotResponse { term }));
+            return Ok(Response::new(ProtoInstallSnapshotResponse { term }));
         }
 
-        // Step 2: Update term and become follower if leader's term > currentTerm
+        // Step 2: Update term and become follower if leader's term > currentTerm.
+        // Snapshot payload application is intentionally deferred in this PoC.
         if req.term > term {
             term = req.term;
             let mut node = self.node.write().await;
             node.become_follower(term);
         }
 
-        // For simplicity, we won't implement actual snapshot installation logic here
-        // TODO: In a real implementation, we would replace the log with the snapshot state
-
-        Ok(Response::new(proto::InstallSnapshotResponse { term }))
+        Ok(Response::new(ProtoInstallSnapshotResponse { term }))
     }
 }
 
@@ -232,16 +232,14 @@ impl RaftRpc for NodeRpcService {
 
     async fn install_snapshot(
         &self,
-        request: Request<proto::InstallSnapshotRequest>,
-    ) -> Result<Response<proto::InstallSnapshotResponse>, Status> {
+        request: Request<ProtoInstallSnapshotRequest>,
+    ) -> Result<Response<ProtoInstallSnapshotResponse>, Status> {
         println!(
             "Received InstallSnapshot from {}",
             request.get_ref().leader_id
         );
 
-        Ok(Response::new(proto::InstallSnapshotResponse {
-            term: request.get_ref().term,
-        }))
+        self.install_snapshot_svc(request).await
     }
 }
 
@@ -293,6 +291,32 @@ pub async fn send_append_entries(
     Ok(res)
 }
 
+pub async fn send_install_snapshot(
+    target: &str,
+    term: u64,
+    leader_id: &str,
+    last_included_index: u64,
+    last_included_term: u64,
+    data: Vec<u8>,
+) -> Result<Response<ProtoInstallSnapshotResponse>, NodeError> {
+    let endpoint = normalize_target_uri(target)?;
+    let channel = Endpoint::from_shared(endpoint)?.connect().await?;
+    let mut client = RaftRpcClient::new(channel);
+
+    let res = client
+        .install_snapshot(Request::new(ProtoInstallSnapshotRequest {
+            term,
+            leader_id: leader_id.to_string(),
+            last_included_index,
+            last_included_term,
+            data,
+        }))
+        .await
+        .map_err(|e| NodeError::InstallSnapshotFailed(e.to_string()))?;
+
+    Ok(res)
+}
+
 fn normalize_target_uri(target: &str) -> Result<String, NodeError> {
     if target.trim().is_empty() {
         return Err(NodeError::InvalidPeerTarget(target.to_string()));
@@ -314,7 +338,11 @@ mod tests {
 
     use super::{
         NodeRpcService, ProtoRequestVoteRequest, RaftRpc, normalize_target_uri,
-        proto::{AppendEntriesRequest as ProtoAppendEntriesRequest, LogEntry as ProtoLogEntry},
+        proto::{
+            AppendEntriesRequest as ProtoAppendEntriesRequest,
+            InstallSnapshotRequest as ProtoInstallSnapshotRequest,
+            LogEntry as ProtoLogEntry,
+        },
     };
     use crate::node::{error::NodeError, node::RaftNode};
     use crate::storage::MockStore;
@@ -670,5 +698,50 @@ mod tests {
 
         let node = node.read().await;
         assert_eq!(node.get_commit_index(), 2);
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_rejects_stale_term() {
+        let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
+        node.become_follower(3);
+        let node = Arc::new(RwLock::new(node));
+        let service = NodeRpcService::new(node);
+
+        let response = service
+            .install_snapshot(Request::new(ProtoInstallSnapshotRequest {
+                term: 2,
+                leader_id: "leader-1".to_string(),
+                last_included_index: 0,
+                last_included_term: 0,
+                data: vec![],
+            }))
+            .await
+            .expect("should succeed");
+
+        assert_eq!(response.into_inner().term, 3);
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_updates_term_when_higher() {
+        let node = Arc::new(RwLock::new(RaftNode::new(
+            "node-1".to_string(),
+            vec![],
+            Box::new(MockStore::new()),
+        )));
+        let service = NodeRpcService::new(node.clone());
+
+        let response = service
+            .install_snapshot(Request::new(ProtoInstallSnapshotRequest {
+                term: 7,
+                leader_id: "leader-1".to_string(),
+                last_included_index: 10,
+                last_included_term: 2,
+                data: b"snapshot-bytes".to_vec(),
+            }))
+            .await
+            .expect("should succeed");
+
+        assert_eq!(response.into_inner().term, 7);
+        assert_eq!(node.read().await.get_term(), 7);
     }
 }
