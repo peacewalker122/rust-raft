@@ -21,10 +21,6 @@ impl NodeScheduler {
         NodeScheduler { node }
     }
 
-    // ============================================================
-    // Option 3: Separate Timer Tasks (runs outside lock)
-    // ============================================================
-
     /// Spawns a background task that signals election timeout
     fn spawn_election_timer(&self) -> tokio::sync::mpsc::Receiver<()> {
         let (tx, rx) = tokio::sync::mpsc::channel(1);

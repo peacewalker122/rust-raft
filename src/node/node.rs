@@ -182,8 +182,11 @@ impl RaftNode {
         Ok(())
     }
 
-    pub fn push_log(&mut self, entry: crate::log::log::LogEntry) {
+    pub async fn push_log(&mut self, entry: crate::log::log::LogEntry) -> Result<(), NodeError> {
         self.log.push(entry);
+        self.persist().await?;
+
+        Ok(())
     }
 
     /// Persist the entire node state to storage

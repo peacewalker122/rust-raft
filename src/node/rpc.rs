@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use tonic::{
-    Request, Response, Status,
-    transport::{Endpoint, Server},
-};
+use tonic::{Request, Response, Status, transport::Endpoint};
 
 use crate::node::{error::NodeError, node::RaftNode};
 
@@ -148,7 +145,6 @@ impl NodeRpcService {
 
         // Truncate log at conflict point (entries after prev_log_index)
         if req.prev_log_index < log_len {
-            let truncate_count = (log_len - req.prev_log_index) as usize;
             node.log.truncate(req.prev_log_index as usize);
         }
 
@@ -174,6 +170,35 @@ impl NodeRpcService {
             success: true,
             term,
         }))
+    }
+
+    async fn install_snapshot(
+        &self,
+        request: Request<proto::InstallSnapshotRequest>,
+    ) -> Result<Response<proto::InstallSnapshotResponse>, Status> {
+        let req = request.into_inner();
+
+        let (mut term, node_log_len) = {
+            let node = self.node.read().await;
+            (node.get_term(), node.log.len() as u64)
+        };
+
+        // Step 1: Reply false if term < currentTerm
+        if req.term < term {
+            return Ok(Response::new(proto::InstallSnapshotResponse { term }));
+        }
+
+        // Step 2: Update term and become follower if leader's term > currentTerm
+        if req.term > term {
+            term = req.term;
+            let mut node = self.node.write().await;
+            node.become_follower(term);
+        }
+
+        // For simplicity, we won't implement actual snapshot installation logic here
+        // TODO: In a real implementation, we would replace the log with the snapshot state
+
+        Ok(Response::new(proto::InstallSnapshotResponse { term }))
     }
 }
 
@@ -203,6 +228,20 @@ impl RaftRpc for NodeRpcService {
         );
 
         self.append_entries_svc(request).await
+    }
+
+    async fn install_snapshot(
+        &self,
+        request: Request<proto::InstallSnapshotRequest>,
+    ) -> Result<Response<proto::InstallSnapshotResponse>, Status> {
+        println!(
+            "Received InstallSnapshot from {}",
+            request.get_ref().leader_id
+        );
+
+        Ok(Response::new(proto::InstallSnapshotResponse {
+            term: request.get_ref().term,
+        }))
     }
 }
 
@@ -533,7 +572,9 @@ mod tests {
     async fn append_entries_rejects_mismatched_prev_log() {
         // Node has entry at index 1 with term 1, but leader says prev_log_term 2
         let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
-        node.push_log(crate::log::log::LogEntry::new(1, b"old cmd"));
+        node.push_log(crate::log::log::LogEntry::new(1, b"old cmd"))
+            .await
+            .expect("should push log");
         let node = Arc::new(RwLock::new(node));
         let service = NodeRpcService::new(node.clone());
 
@@ -564,8 +605,12 @@ mod tests {
     async fn append_entries_truncates_conflicting_entries() {
         // Node has entries [1, 2], leader wants to replace from index 1
         let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
-        node.push_log(crate::log::log::LogEntry::new(1, b"cmd1"));
-        node.push_log(crate::log::log::LogEntry::new(1, b"cmd2"));
+        node.push_log(crate::log::log::LogEntry::new(1, b"cmd1"))
+            .await
+            .expect("should push log");
+        node.push_log(crate::log::log::LogEntry::new(1, b"cmd2"))
+            .await
+            .expect("should push log");
         let node = Arc::new(RwLock::new(node));
         let service = NodeRpcService::new(node.clone());
 
