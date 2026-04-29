@@ -16,6 +16,37 @@ use rust_raft::storage::MockStore;
 use tokio::sync::RwLock;
 use tonic::transport::Server;
 
+// #[tokio::test]
+// async fn docker_compose_cluster_starts() {
+//     use std::process::Command;
+//
+//     let status = Command::new("docker")
+//         .args([
+//             "compose",
+//             "-f",
+//             "docker-compose.test.yml",
+//             "up",
+//             "--build",
+//             "--wait",
+//         ])
+//         .status()
+//         .expect("failed to execute docker compose");
+//
+//     assert!(status.success(), "docker compose failed");
+//
+//     let status = Command::new("docker")
+//         .args([
+//             "compose",
+//             "-f",
+//             "docker-compose.test.yml",
+//             "down",
+//         ])
+//         .status()
+//         .expect("failed to execute docker compose down");
+//
+//     assert!(status.success(), "docker compose down failed");
+// }
+
 /// Helper to start a Raft node server with scheduler running
 async fn start_node_server(
     node_id: String,
