@@ -1,10 +1,10 @@
 APP_NAME := rust-raft
 DOCKER_IMAGE ?= $(APP_NAME):local
 
-.PHONY: build run test fmt lint check clean dev docker-build help
+.PHONY: build run test fmt lint check clean dev docker-build docker-integration help
 
 help:
-	@echo "Targets: build, run, test, fmt, lint, check, clean, dev, docker-build"
+	@echo "Targets: build, run, test, fmt, lint, check, clean, dev, docker-build, docker-integration"
 
 build:
 	cargo build
@@ -32,3 +32,6 @@ dev:
 
 docker-build:
 	docker build -t $(DOCKER_IMAGE) .
+
+docker-integration:
+	docker compose -f docker-compose.test.yml up --build --wait

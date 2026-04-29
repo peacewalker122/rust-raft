@@ -1,0 +1,21 @@
+services:
+  node-1:
+    build: .
+    environment:
+      RAFT_NODE_ID: node-1
+      RAFT_PEERS: node-2:50051,node-3:50051
+      RAFT_GRPC_BIND: 0.0.0.0:50051
+
+  node-2:
+    build: .
+    environment:
+      RAFT_NODE_ID: node-2
+      RAFT_PEERS: node-1:50051,node-3:50051
+      RAFT_GRPC_BIND: 0.0.0.0:50051
+
+  node-3:
+    build: .
+    environment:
+      RAFT_NODE_ID: node-3
+      RAFT_PEERS: node-1:50051,node-2:50051
+      RAFT_GRPC_BIND: 0.0.0.0:50051
