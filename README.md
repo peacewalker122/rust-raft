@@ -81,6 +81,84 @@ RAFT_GRPC_BIND=127.0.0.1:50051 \
 cargo run
 ```
 
+## Using as a library (PoC)
+
+You can embed this crate as a Raft consensus component in another Rust service. This is still a PoC, but the library provides the core building blocks:
+
+- `RaftNode` for node state and transitions
+- `NodeScheduler` for election/heartbeat scheduling
+- `NodeRpcService` for gRPC-based Raft RPCs
+- `PersistentStore` for basic crash-safe state persistence
+
+### Add dependency
+
+Add this crate as a path dependency (or git dependency if you publish it later):
+
+```toml
+[dependencies]
+rust-raft = { path = "../rust-raft" }
+```
+
+### Minimal embed example
+
+```rust
+use std::sync::Arc;
+
+use rust_raft::{
+    config::RaftConfig,
+    node::{
+        node::RaftNode,
+        rpc::{NodeRpcService, proto::raft_rpc_server::RaftRpcServer},
+        scheduler::NodeScheduler,
+    },
+    storage::storage::PersistentStore,
+};
+use tonic::transport::Server;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = RaftConfig::from_env()?;
+
+    let term_file = tokio::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&config.term_file_path)
+        .await?;
+
+    let log_file = tokio::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&config.log_file_path)
+        .await?;
+
+    let storage = Box::new(PersistentStore::new(log_file, term_file));
+
+    let shared_node = Arc::new(tokio::sync::RwLock::new(RaftNode::new(
+        config.node_id,
+        config.peers,
+        storage,
+    )));
+
+    let scheduler = NodeScheduler::new(shared_node.clone());
+    tokio::spawn(async move { scheduler.start().await });
+
+    Server::builder()
+        .add_service(RaftRpcServer::new(NodeRpcService::new(shared_node)))
+        .serve(config.grpc_bind)
+        .await?;
+
+    Ok(())
+}
+```
+
+### Notes and caveats
+
+- There is no stable public API yet; expect breaking changes.
+- Leader election is basic and not hardened.
+- You will need to design your own state machine/apply layer on top.
+
 ## License
 
 This project is licensed under the MIT License.
