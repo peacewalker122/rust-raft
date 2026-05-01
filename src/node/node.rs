@@ -26,6 +26,11 @@ pub struct RaftNode {
     commit_index: u64,
     last_applied: u64,
 
+    // Snapshot state for log compaction
+    pub last_included_index: u64,
+    pub last_included_term: u64,
+    pub snapshot_data: Option<Vec<u8>>,
+
     next_index: Option<HashMap<String, u64>>, // Only used by leader to track next log index to send to each follower
     match_index: Option<HashMap<String, u64>>, // Only used by leader to track replication status of followers
 
@@ -63,6 +68,9 @@ impl RaftNode {
             log: Vec::new(),
             commit_index: 0,
             last_applied: 0,
+            last_included_index: 0,
+            last_included_term: 0,
+            snapshot_data: None,
             next_index: None,
             match_index: None,
             state: NodeState::Follower,
@@ -214,5 +222,46 @@ impl RaftNode {
 
     pub fn set_commit_index(&mut self, index: u64) {
         self.commit_index = index;
+    }
+
+    // -- Snapshot management --
+
+    /// Install a snapshot from the leader, replacing state machine and truncating log
+    pub async fn install_snapshot(
+        &mut self,
+        last_included_index: u64,
+        last_included_term: u64,
+        snapshot_data: Vec<u8>,
+    ) -> Result<(), NodeError> {
+        // Raft spec: truncate log to lastIncludedIndex - 1, delete conflicting entries
+        // Since our log is 0-indexed, we keep entries before last_included_index
+        if last_included_index > 0 {
+            self.log.truncate(last_included_index as usize);
+        }
+
+        // Apply snapshot state
+        self.last_included_index = last_included_index;
+        self.last_included_term = last_included_term;
+        self.snapshot_data = Some(snapshot_data);
+
+        // Reset volatile state per Raft spec
+        self.commit_index = last_included_index;
+        self.last_applied = last_included_index;
+
+        Ok(())
+    }
+
+    /// Get snapshot state for sending to followers
+    pub fn get_snapshot_state(&self) -> (u64, u64, Option<&Vec<u8>>) {
+        (
+            self.last_included_index,
+            self.last_included_term,
+            self.snapshot_data.as_ref(),
+        )
+    }
+
+    /// Check if node has a snapshot to send
+    pub fn has_snapshot(&self) -> bool {
+        self.snapshot_data.is_some()
     }
 }

@@ -269,10 +269,14 @@ impl Store for PersistentStore {
 
     async fn load(&self) -> Result<PersistentState, StorageError> {
         // Read term and voted_for from stored term_file
-        let mut term_file_clone = self.term_file.try_clone().await
+        let mut term_file_clone = self
+            .term_file
+            .try_clone()
+            .await
             .map_err(|e| StorageError::IoError(e.to_string()))?;
         let mut term_data = vec![];
-        term_file_clone.read_to_end(&mut term_data)
+        term_file_clone
+            .read_to_end(&mut term_data)
             .await
             .map_err(|e| StorageError::IoError(e.to_string()))?;
 
@@ -283,10 +287,14 @@ impl Store for PersistentStore {
         };
 
         // Read log from stored log_file
-        let mut log_file_clone = self.log_file.try_clone().await
+        let mut log_file_clone = self
+            .log_file
+            .try_clone()
+            .await
             .map_err(|e| StorageError::IoError(e.to_string()))?;
         let mut log_data = vec![];
-        log_file_clone.read_to_end(&mut log_data)
+        log_file_clone
+            .read_to_end(&mut log_data)
             .await
             .map_err(|e| StorageError::IoError(e.to_string()))?;
 
@@ -521,3 +529,4 @@ mod tests {
         assert!(full_result.is_ok(), "expected Ok for full encoded payload");
     }
 }
+

@@ -17,6 +17,7 @@ tokio = { version = "1.43", features = [
   "time",            # Needed for timeouts (e.g., during network calls)
   "rt-multi-thread", # Required for Tokio's async runtime
 ] }
+futures-util = "0.3"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

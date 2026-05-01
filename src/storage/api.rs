@@ -8,3 +8,4 @@ pub trait Store: Send + Sync {
     async fn update_term(&mut self, term: u64) -> Result<(), StorageError>;
     async fn update_voted_for(&mut self, voted_for: Option<String>) -> Result<(), StorageError>;
 }
+
