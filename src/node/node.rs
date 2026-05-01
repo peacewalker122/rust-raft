@@ -6,7 +6,9 @@ use tokio::time::interval;
 
 use crate::log::log::LogEntry;
 use crate::node::error::NodeError;
+use crate::node::rpc;
 use crate::storage::api::Store;
+use crate::storage::storage::PersistentState;
 
 #[derive(Debug)]
 enum NodeState {
@@ -190,9 +192,61 @@ impl RaftNode {
         Ok(())
     }
 
-    pub async fn push_log(&mut self, entry: crate::log::log::LogEntry) -> Result<(), NodeError> {
-        self.log.push(entry);
+    pub async fn push_log(&mut self, data: Vec<u8>, term: Option<u64>) -> Result<(), NodeError> {
+        // Get prev log index/term before pushing
+        let log_len = self.log.len() as u64;
+        let prev_log_index = log_len.saturating_sub(1);
+        let prev_log_term = self.log.last().map(|e| e.term).unwrap_or(0);
+
+        // Use provided term or fall back to current_term
+        let entry_term = term.unwrap_or(self.current_term);
+
+        // 1. Append to local log
+        self.log.push(LogEntry {
+            term: entry_term,
+            index: log_len,
+            command: data,
+        });
         self.persist().await?;
+
+        // 2. Replicate to all peers
+        let term = self.current_term;
+        let leader_id = self.id.clone();
+
+        // Convert entry to proto format
+        let proto_entries = vec![rpc::proto::LogEntry {
+            term: self.log.last().unwrap().term,
+            index: self.log.len() as u64,
+            command: self.log.last().unwrap().command.clone(),
+        }];
+
+        let min_qourum = self.get_min_majority_vote();
+        let mut success_count = 1; // Count self vote
+
+        for peer in &self.peers {
+            let prev_idx = prev_log_index;
+            let prev_term = prev_log_term;
+
+            // Send to peer (ignore errors for now - leader will retry)
+            let res = rpc::send_append_entries(
+                peer,
+                term,
+                &leader_id,
+                prev_idx,
+                prev_term,
+                proto_entries.clone(),
+                self.commit_index, // don't commit yet - wait for quorum
+            )
+            .await?;
+
+            if res.get_ref().success {
+                success_count += 1;
+            }
+        }
+
+        if success_count >= min_qourum {
+            self.commit_index = self.log.len() as u64;
+        }
 
         Ok(())
     }
@@ -263,5 +317,15 @@ impl RaftNode {
     /// Check if node has a snapshot to send
     pub fn has_snapshot(&self) -> bool {
         self.snapshot_data.is_some()
+    }
+
+    pub async fn get_raft_state(&self) -> Result<PersistentState, NodeError> {
+        let res = self
+            .storage
+            .load()
+            .await
+            .map_err(|e| NodeError::Storage(e))?;
+
+        Ok(res)
     }
 }

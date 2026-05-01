@@ -14,6 +14,7 @@ use proto::{
     InstallSnapshotRequest as ProtoInstallSnapshotRequest,
     InstallSnapshotResponse as ProtoInstallSnapshotResponse,
     RequestVoteRequest as ProtoRequestVoteRequest, RequestVoteResponse as ProtoRequestVoteResponse,
+    LogEntry as ProtoLogEntry,
     raft_rpc_client::RaftRpcClient, raft_rpc_server::RaftRpc,
 };
 
@@ -295,6 +296,10 @@ pub async fn send_append_entries(
     target: &str,
     term: u64,
     leader_id: &str,
+    prev_log_index: u64,
+    prev_log_term: u64,
+    entries: Vec<ProtoLogEntry>,
+    leader_commit: u64,
 ) -> Result<Response<ProtoAppendEntriesResponse>, NodeError> {
     let endpoint = normalize_target_uri(target)?;
     let channel = Endpoint::from_shared(endpoint)?.connect().await?;
@@ -304,10 +309,10 @@ pub async fn send_append_entries(
         .append_entries(Request::new(ProtoAppendEntriesRequest {
             term,
             leader_id: leader_id.to_string(),
-            prev_log_index: 0,
-            prev_log_term: 0,
-            entries: Vec::new(),
-            leader_commit: 0,
+            prev_log_index,
+            prev_log_term,
+            entries,
+            leader_commit,
         }))
         .await
         .map_err(|e| NodeError::AppendEntriesFailed(e.to_string()))?;
@@ -639,7 +644,7 @@ mod tests {
     async fn append_entries_rejects_mismatched_prev_log() {
         // Node has entry at index 1 with term 1, but leader says prev_log_term 2
         let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
-        node.push_log(crate::log::log::LogEntry::new(1, b"old cmd"))
+        node.push_log(b"old cmd".to_vec(), Some(1))
             .await
             .expect("should push log");
         let node = Arc::new(RwLock::new(node));
@@ -672,10 +677,10 @@ mod tests {
     async fn append_entries_truncates_conflicting_entries() {
         // Node has entries [1, 2], leader wants to replace from index 1
         let mut node = RaftNode::new("node-1".to_string(), vec![], Box::new(MockStore::new()));
-        node.push_log(crate::log::log::LogEntry::new(1, b"cmd1"))
+        node.push_log(b"cmd1".to_vec(), Some(1))
             .await
             .expect("should push log");
-        node.push_log(crate::log::log::LogEntry::new(1, b"cmd2"))
+        node.push_log(b"cmd2".to_vec(), Some(1))
             .await
             .expect("should push log");
         let node = Arc::new(RwLock::new(node));

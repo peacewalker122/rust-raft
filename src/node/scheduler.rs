@@ -76,12 +76,31 @@ impl NodeScheduler {
         &self,
         peer: &str,
     ) -> Result<Response<AppendEntriesResponse>, NodeError> {
-        let (term, id) = {
+        let (term, id, prev_log_index, prev_log_term, entries, commit) = {
             let node = self.node.read().await;
-            (node.get_term(), node.id.clone())
+            let prev_idx = node.last_log_index().unwrap_or(0);
+            let prev_term = node.last_log_term().unwrap_or(0);
+            let commit = node.get_commit_index();
+            (
+                node.get_term(),
+                node.id.clone(),
+                prev_idx,
+                prev_term,
+                Vec::new(), // entries sent separately
+                commit,
+            )
         };
 
-        rpc::send_append_entries(peer, term, &id).await
+        rpc::send_append_entries(
+            peer,
+            term,
+            &id,
+            prev_log_index,
+            prev_log_term,
+            entries,
+            commit,
+        )
+        .await
     }
 
     /// Run election: become candidate, request votes, try to become leader
