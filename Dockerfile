@@ -13,14 +13,14 @@ RUN apt-get update && apt-get install -y \
   protobuf-compiler \
   && rm -rf /var/lib/apt/lists/*
 
-RUN cargo build --release
+RUN cargo build --release --bin kv
 
 # ---- runtime ----
-FROM gcr.io/distroless/base-debian12
+FROM gcr.io/distroless/cc-debian12
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/rust-raft /app/rust-raft
+COPY --from=builder /app/target/release/kv /app/kv
 
 ENV RAFT_GRPC_BIND=0.0.0.0:50051
 
@@ -28,4 +28,4 @@ EXPOSE 50051
 
 USER nonroot:nonroot
 
-ENTRYPOINT ["/app/rust-raft"]
+ENTRYPOINT ["/app/kv"]

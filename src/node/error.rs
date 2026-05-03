@@ -36,4 +36,7 @@ pub enum NodeError {
 
     #[error("internal server error: {0}")]
     InternalServerError(String),
+
+    #[error(transparent)]
+    EventSend(#[from] tokio::sync::mpsc::error::SendError<Vec<u8>>),
 }

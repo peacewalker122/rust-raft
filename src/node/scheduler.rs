@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rand::RngExt;
+use tokio::sync::mpsc::Receiver;
 use tonic::Response;
+use tracing;
 
 use crate::node::{
     error::NodeError,
@@ -12,47 +15,45 @@ use crate::node::{
     },
 };
 
+pub enum SchedulerEvent {
+    ElectionTimeout,
+    HeartbeatTimeout,
+}
+
 pub struct NodeScheduler {
     node: Arc<tokio::sync::RwLock<RaftNode>>,
+
+    event_recv: tokio::sync::mpsc::Receiver<SchedulerEvent>,
+
+    heartbeat_timer: tokio::time::Interval,
+    election_timer: tokio::time::Interval,
 }
 
 impl NodeScheduler {
-    pub fn new(node: Arc<tokio::sync::RwLock<RaftNode>>) -> Self {
-        NodeScheduler { node }
+    pub fn new(
+        node: Arc<tokio::sync::RwLock<RaftNode>>,
+        event_recv: Receiver<SchedulerEvent>,
+    ) -> Self {
+        NodeScheduler {
+            node,
+            event_recv,
+            heartbeat_timer: tokio::time::interval(Duration::from_millis(
+                randomized_heartbeat_timeout(),
+            )),
+            election_timer: tokio::time::interval(Duration::from_millis(
+                randomized_election_timeout(),
+            )),
+        }
     }
 
-    /// Spawns a background task that signals election timeout
-    fn spawn_election_timer(&self) -> tokio::sync::mpsc::Receiver<()> {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-
-        tokio::spawn(async move {
-            loop {
-                // Use a simple timeout (fixed or use StdRng if needed)
-                // rand::rng() is not Send, so use thread_rng from thread-local
-                let timeout_ms = 200u64;
-                tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-
-                let _ = tx.send(()).await;
-            }
-        });
-
-        rx
+    fn reset_election_timer(&mut self) {
+        self.election_timer
+            .reset_after(Duration::from_millis(randomized_election_timeout()));
     }
 
-    /// Spawns a background task that signals heartbeat timeout
-    fn spawn_heartbeat_timer(&self) -> tokio::sync::mpsc::Receiver<()> {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-
-        tokio::spawn(async move {
-            loop {
-                let timeout_ms = 50u64;
-                tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-
-                let _ = tx.send(()).await;
-            }
-        });
-
-        rx
+    fn reset_heartbeat_timer(&mut self) {
+        self.heartbeat_timer
+            .reset_after(Duration::from_millis(randomized_heartbeat_timeout()));
     }
 
     async fn send_request_vote(
@@ -104,20 +105,21 @@ impl NodeScheduler {
     }
 
     /// Run election: become candidate, request votes, try to become leader
-    async fn run_election(&self) {
+    async fn run_election(&mut self) {
+        self.reset_election_timer();
+
         // 1. Become candidate ( acquire lock briefly)
-        {
+        let node_id = {
             let mut node = self.node.write().await;
             node.become_candidate()
                 .await
                 .expect("Failed to become candidate (should not fail)");
 
-            println!(
-                "Node {} started election for term {}",
-                node.get_id(),
-                node.get_term()
-            );
-        }
+            let id = node.get_id().to_string();
+            let term = node.get_term();
+            tracing::info!(node_id = %id, term = term, event = "election_started");
+            id
+        };
 
         // 2. Request votes from peers (no lock held)
         let peers = {
@@ -126,16 +128,18 @@ impl NodeScheduler {
         };
 
         let mut votes_received = 1u64; // Vote for self
-        for peer in peers {
-            match self.send_request_vote(&peer).await {
+        for peer in &peers {
+            match self.send_request_vote(peer).await {
                 Ok(resp) => {
-                    println!("Received response from {}: {:?}", peer, resp);
-                    if resp.into_inner().success {
-                        println!("Received vote from {}", peer);
+                    let granted = resp.into_inner().success;
+                    tracing::debug!(node_id = %node_id, peer = %peer, granted = granted, event = "vote_received");
+                    if granted {
                         votes_received += 1;
                     }
                 }
-                Err(error) => println!("Failed to request vote from {}: {}", peer, error),
+                Err(error) => {
+                    tracing::error!(node_id = %node_id, error = %error, context = "request_vote_failed");
+                }
             }
         }
 
@@ -147,18 +151,15 @@ impl NodeScheduler {
 
         if election_won {
             // 4. Become leader (brief lock)
-            {
+            let term = {
                 let mut node = self.node.write().await;
                 if let Err(err) = node.become_leader() {
-                    println!("Failed to become leader: {}", err);
+                    tracing::error!(node_id = %node_id, error = %err, context = "become_leader_failed");
                     return;
                 }
-                println!(
-                    "Node {} became leader with {} votes",
-                    node.get_id(),
-                    votes_received
-                );
-            }
+                tracing::info!(node_id = %node_id, term = node.get_term(), vote_count = votes_received, event = "became_leader");
+                node.get_term()
+            };
 
             // 5. Send initial AppendEntries to assert leadership
             let peers = {
@@ -166,10 +167,10 @@ impl NodeScheduler {
                 node.get_peers().to_vec()
             };
 
-            for peer in peers {
-                match self.send_append_entries(&peer).await {
-                    Ok(_) => println!("Sent heartbeat to {}", peer),
-                    Err(e) => println!("Failed to send heartbeat to {}: {}", peer, e),
+            for peer in &peers {
+                match self.send_append_entries(peer).await {
+                    Ok(_) => tracing::trace!(node_id = %node_id, term = term, target = %peer, event = "heartbeat"),
+                    Err(e) => tracing::error!(node_id = %node_id, error = %format!("heartbeat_failed: {}", e), context = "send_append_entries"),
                 }
             }
         }
@@ -177,40 +178,70 @@ impl NodeScheduler {
 
     /// Send heartbeat to all peers (leader only)
     async fn send_heartbeats(&self) {
-        let peers = {
+        let (node_id, term, peers) = {
             let node = self.node.read().await;
             if !node.is_leader() {
                 return;
             }
-            node.get_peers().to_vec()
+            (node.get_id().to_string(), node.get_term(), node.get_peers().to_vec())
         };
 
-        for peer in peers {
-            match self.send_append_entries(&peer).await {
-                Ok(_) => println!("Sent heartbeat to {}", peer),
-                Err(e) => println!("Failed to send heartbeat to {}: {}", peer, e),
+        for peer in &peers {
+            match self.send_append_entries(peer).await {
+                Ok(_) => tracing::trace!(node_id = %node_id, term = term, target = %peer, event = "heartbeat"),
+                Err(e) => tracing::error!(node_id = %node_id, error = %format!("heartbeat_failed: {}", e), context = "send_append_entries"),
             }
         }
     }
 
-    pub async fn start(&self) {
-        // Spawn timer tasks (Option 3)
-        let mut election_timer = self.spawn_election_timer();
-        let mut heartbeat_timer = self.spawn_heartbeat_timer();
-
+    pub async fn start(&mut self) {
         loop {
-            // Use tokio::select! to wait on whichever timer fires (Option 2)
             tokio::select! {
-                // Election timeout fired -> run election
-                _ = election_timer.recv() => {
-                    self.run_election().await;
+                _ = self.election_timer.tick() => {
+                    let is_leader = {
+                        let node = self.node.read().await;
+                        node.is_leader()
+                    };
+                    if !is_leader {
+                        self.run_election().await;
+                    }
                 }
+                _ = self.heartbeat_timer.tick() => {
+                    let is_leader = {
+                        let node = self.node.read().await;
+                        node.is_leader()
+                    };
 
-                // Heartbeat timeout fired -> send heartbeats
-                _ = heartbeat_timer.recv() => {
-                    self.send_heartbeats().await;
+                    // Only send heartbeats if we're the leader
+                    if is_leader {
+                        self.send_heartbeats().await;
+                    }
+                }
+                Some(event) = self.event_recv.recv() => {
+                    match event {
+                        SchedulerEvent::ElectionTimeout => {
+                            self.reset_election_timer();
+                        }
+                        SchedulerEvent::HeartbeatTimeout => {
+                            // No-op: timer always runs, we check is_leader() before sending
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+fn randomized_election_timeout() -> u64 {
+    let mut rng = rand::rng();
+    let timeout_ms = rng.random_range(500..1000);
+
+    timeout_ms
+}
+
+fn randomized_heartbeat_timeout() -> u64 {
+    let mut rng = rand::rng();
+    let timeout_ms = rng.random_range(0..50);
+
+    timeout_ms
 }

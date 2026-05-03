@@ -1,0 +1,4 @@
+[profile.default]
+# Enforce a hard timeout policy for each test.
+# A test is marked slow after 30s and terminated after one period.
+slow-timeout = { period = "30s", terminate-after = 1 }

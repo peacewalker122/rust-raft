@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
-use rand::RngExt;
-use tokio::time::interval;
+use tokio::sync::mpsc::Sender;
 
 use crate::log::log::LogEntry;
 use crate::node::error::NodeError;
@@ -37,30 +35,20 @@ pub struct RaftNode {
     match_index: Option<HashMap<String, u64>>, // Only used by leader to track replication status of followers
 
     state: NodeState,
-
-    // Hearbeat timer and election timer would be implemented here
-    pub heartbeat_timer: tokio::time::Interval,
-    pub election_timer: tokio::time::Interval,
+    leader_id: Option<String>, // Track who the current leader is
 
     storage: Box<dyn Store>,
-}
 
-fn randomized_election_timeout() -> u64 {
-    let mut rng = rand::rng();
-    let timeout_ms = rng.random_range(150..300);
-
-    timeout_ms
-}
-
-fn randomized_heartbeat_timeout() -> u64 {
-    let mut rng = rand::rng();
-    let timeout_ms = rng.random_range(50..100);
-
-    timeout_ms
+    event_sender: Sender<Vec<u8>>,
 }
 
 impl RaftNode {
-    pub fn new(id: String, peers: Vec<String>, storage: Box<dyn Store>) -> Self {
+    pub fn new(
+        id: String,
+        peers: Vec<String>,
+        storage: Box<dyn Store>,
+        event_sender: Sender<Vec<u8>>,
+    ) -> Self {
         // Initialize with defaults - load() should be called after to recover state
         RaftNode {
             id,
@@ -76,9 +64,9 @@ impl RaftNode {
             next_index: None,
             match_index: None,
             state: NodeState::Follower,
-            heartbeat_timer: interval(Duration::from_millis(randomized_heartbeat_timeout())),
-            election_timer: interval(Duration::from_millis(randomized_election_timeout())),
+            leader_id: None,
             storage,
+            event_sender,
         }
     }
 
@@ -88,7 +76,7 @@ impl RaftNode {
         peers: Vec<String>,
         storage: Box<dyn Store>,
     ) -> Result<Self, NodeError> {
-        let mut node = Self::new(id, peers, storage);
+        let mut node = Self::new(id, peers, storage, tokio::sync::mpsc::channel(100).0);
 
         // Load persisted state
         if let Ok(state) = node.storage.load().await {
@@ -98,10 +86,6 @@ impl RaftNode {
         }
 
         Ok(node)
-    }
-
-    pub fn reset_election_timer(&mut self) {
-        self.election_timer = interval(Duration::from_millis(randomized_election_timeout()));
     }
 
     // Methods for handling RPCs, state transitions, and log replication would be implemented here
@@ -116,14 +100,12 @@ impl RaftNode {
             .update_voted_for(self.voted_for.clone())
             .await?;
 
-        // Reset election timer
-        self.reset_election_timer();
-
         Ok(())
     }
 
     pub fn become_leader(&mut self) -> Result<(), NodeError> {
         self.state = NodeState::Leader;
+        self.leader_id = Some(self.id.clone());
         // Initialize next_index and match_index for each peer
         let last_idx = self.last_log_index()?;
 
@@ -143,8 +125,15 @@ impl RaftNode {
         self.state = NodeState::Follower;
         self.current_term = term;
         self.voted_for = None;
-        // Reset election timer
-        self.reset_election_timer();
+        self.leader_id = None; // Clear leader when becoming follower
+    }
+
+    pub fn set_leader(&mut self, leader_id: String) {
+        self.leader_id = Some(leader_id);
+    }
+
+    pub fn get_leader_id(&self) -> Option<&str> {
+        self.leader_id.as_deref()
     }
 
     pub fn last_log_index(&self) -> Result<u64, NodeError> {
@@ -246,6 +235,11 @@ impl RaftNode {
 
         if success_count >= min_qourum {
             self.commit_index = self.log.len() as u64;
+
+            self.event_sender
+                .send(self.log.last().unwrap().command.clone())
+                .await
+                .map_err(|e| NodeError::EventSend(e))?;
         }
 
         Ok(())

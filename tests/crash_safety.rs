@@ -11,6 +11,7 @@ use rust_raft::storage::error::StorageError;
 use rust_raft::storage::storage::PersistentState;
 use rust_raft::storage::storage::PersistentStore;
 use tokio::fs::OpenOptions;
+use tokio::sync::mpsc;
 
 /// Test store that wraps PersistentStore
 struct TestStore {
@@ -108,7 +109,8 @@ async fn test_term_persisted_on_become_candidate() {
 
     // Create store and node
     let mut store = TestStore::create_new(term_file, log_file).await;
-    let mut node = RaftNode::new("node-a".to_string(), vec![], Box::new(store));
+    let (event_tx, _) = mpsc::channel::<Vec<u8>>(256);
+    let mut node = RaftNode::new("node-a".to_string(), vec![], Box::new(store), event_tx);
 
     // Verify initial state
     assert_eq!(node.get_term(), 0, "initial term should be 0");
@@ -160,7 +162,8 @@ async fn test_voted_for_persisted_on_grant_vote() {
 
     // Create store and node
     let mut store = TestStore::create_new(term_file, log_file).await;
-    let mut node = RaftNode::new("voter".to_string(), vec![], Box::new(store));
+    let (event_tx, _) = mpsc::channel::<Vec<u8>>(256);
+    let mut node = RaftNode::new("voter".to_string(), vec![], Box::new(store), event_tx);
 
     // Simulate receiving a vote request from candidate-x
     node.set_voted_for(Some("candidate-x".to_string()))
@@ -197,7 +200,8 @@ async fn test_term_and_voted_for_persist_through_election() {
 
     // Create store and node
     let mut store = TestStore::create_new(term_file, log_file).await;
-    let mut node = RaftNode::new("candidate".to_string(), vec![], Box::new(store));
+    let (event_tx, _) = mpsc::channel::<Vec<u8>>(256);
+    let mut node = RaftNode::new("candidate".to_string(), vec![], Box::new(store), event_tx);
 
     // Become candidate (term=1, voted_for=self)
     node.become_candidate().await.expect("first election");
@@ -240,7 +244,8 @@ async fn test_corrupt_file_handled_gracefully() {
     // Create a store and set state
     {
         let mut store = TestStore::create_new(term_file, log_file).await;
-        let mut node = RaftNode::new("node".to_string(), vec![], Box::new(store));
+        let (event_tx, _) = mpsc::channel::<Vec<u8>>(256);
+        let mut node = RaftNode::new("node".to_string(), vec![], Box::new(store), event_tx);
         node.current_term = 1;
         node.voted_for = Some("node".to_string());
     }
@@ -291,7 +296,8 @@ async fn test_consecutive_elections_crash_safe() {
     // First election - become candidate (term=1)
     {
         let store = TestStore::create_new(term_file, log_file).await;
-        let mut node = RaftNode::new("node".to_string(), vec![], Box::new(store));
+        let (event_tx, _) = mpsc::channel::<Vec<u8>>(256);
+        let mut node = RaftNode::new("node".to_string(), vec![], Box::new(store), event_tx);
         node.become_candidate().await.expect("first election");
     }
 
@@ -329,4 +335,3 @@ async fn test_consecutive_elections_crash_safe() {
 
     cleanup_test_files(term_file, log_file).await;
 }
-

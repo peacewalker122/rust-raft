@@ -1,21 +1,84 @@
 services:
   node-1:
     build: .
+    networks:
+      - raft-net
+    ports:
+      - "50051:50051"
+      - "8081:8081"
     environment:
       RAFT_NODE_ID: node-1
-      RAFT_PEERS: node-2:50051,node-3:50051
+      RAFT_PEERS: node-2:50051
       RAFT_GRPC_BIND: 0.0.0.0:50051
+      RAFT_TERM_FILE: /tmp/raft_term.dat
+      RAFT_LOG_FILE: /tmp/raft_log.dat
+      KV_HTTP_ADDR: 0.0.0.0:8081
 
   node-2:
     build: .
+    networks:
+      - raft-net
+    ports:
+      - "50052:50051"
+      - "8082:8082"
     environment:
       RAFT_NODE_ID: node-2
-      RAFT_PEERS: node-1:50051,node-3:50051
+      RAFT_PEERS: node-1:50051
       RAFT_GRPC_BIND: 0.0.0.0:50051
+      RAFT_TERM_FILE: /tmp/raft_term.dat
+      RAFT_LOG_FILE: /tmp/raft_log.dat
+      KV_HTTP_ADDR: 0.0.0.0:8082
 
-  node-3:
-    build: .
-    environment:
-      RAFT_NODE_ID: node-3
-      RAFT_PEERS: node-1:50051,node-2:50051
-      RAFT_GRPC_BIND: 0.0.0.0:50051
+  # node-3:
+  #   build: .
+  #   networks:
+  #     - raft-net
+  #   ports:
+  #     - "50053:50051"
+  #     - "8083:8083"
+  #   depends_on:
+  #     - node-1
+  #   environment:
+  #     RAFT_NODE_ID: node-3
+  #     RAFT_PEERS: node-1:50051,node-2:50051,node-4:50051,node-5:50051
+  #     RAFT_GRPC_BIND: 0.0.0.0:50051
+  #     RAFT_TERM_FILE: /tmp/raft_term.dat
+  #     RAFT_LOG_FILE: /tmp/raft_log.dat
+  #     KV_HTTP_ADDR: 0.0.0.0:8083
+  #
+  # node-4:
+  #   build: .
+  #   networks:
+  #     - raft-net
+  #   ports:
+  #     - "50054:50051"
+  #     - "8084:8084"
+  #   depends_on:
+  #     - node-1
+  #   environment:
+  #     RAFT_NODE_ID: node-4
+  #     RAFT_PEERS: node-1:50051,node-2:50051,node-3:50051,node-5:50051
+  #     RAFT_GRPC_BIND: 0.0.0.0:50051
+  #     RAFT_TERM_FILE: /tmp/raft_term.dat
+  #     RAFT_LOG_FILE: /tmp/raft_log.dat
+  #     KV_HTTP_ADDR: 0.0.0.0:8084
+  #
+  # node-5:
+  #   build: .
+  #   networks:
+  #     - raft-net
+  #   ports:
+  #     - "50055:50051"
+  #     - "8085:8085"
+  #   depends_on:
+  #     - node-1
+  #   environment:
+  #     RAFT_NODE_ID: node-5
+  #     RAFT_PEERS: node-1:50051,node-2:50051,node-3:50051,node-4:50051
+  #     RAFT_GRPC_BIND: 0.0.0.0:50051
+  #     RAFT_TERM_FILE: /tmp/raft_term.dat
+  #     RAFT_LOG_FILE: /tmp/raft_log.dat
+  #     KV_HTTP_ADDR: 0.0.0.0:8085
+
+networks:
+  raft-net:
