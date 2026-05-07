@@ -1,12 +1,16 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, Streaming, transport::Endpoint};
+use tracing::info;
 
-use crate::node::{
-    error::NodeError,
-    node::RaftNode,
-    scheduler::{self, SchedulerEvent},
+use crate::{
+    log::log::LogEntry,
+    node::{
+        error::NodeError,
+        node::RaftNode,
+        scheduler::{self, SchedulerEvent},
+    },
 };
 
 pub mod proto {
@@ -98,6 +102,7 @@ impl NodeRpcService {
             node.set_term(term)
                 .await
                 .map_err(|err| Status::internal(format!("failed to persist term: {err}")))?;
+
             node.set_voted_for(Some(req.candidate_id.clone()))
                 .await
                 .map_err(|err| Status::internal(format!("failed to persist voted_for: {err}")))?;
@@ -120,16 +125,16 @@ impl NodeRpcService {
     ) -> Result<Response<ProtoAppendEntriesResponse>, Status> {
         let req = request.into_inner();
 
-        let (mut term, node_log_len, commit_idx) = {
+        let (mut term, node_log_len, commit_idx, prev_last_idx) = {
             let node = self.node.read().await;
             (
                 node.get_term(),
                 node.log.len() as u64,
                 node.get_commit_index(),
+                node.last_log_index().unwrap_or(0),
             )
         };
 
-        // Step 1: Reply false if term < currentTerm
         if req.term < term {
             return Ok(Response::new(ProtoAppendEntriesResponse {
                 success: false,
@@ -137,90 +142,72 @@ impl NodeRpcService {
             }));
         }
 
-        // Step 2: Update term and become follower if leader's term > currentTerm
         if req.term > term {
             term = req.term;
             let mut node = self.node.write().await;
+            node.set_term(term)
+                .await
+                .map_err(|err| Status::internal(format!("failed to persist term: {err}")))?;
             node.become_follower(term);
-            node.set_leader(req.leader_id.clone());
-            let _ = self
-                .scheduler_tx
-                .send(SchedulerEvent::ElectionTimeout)
-                .await;
+            node.set_leader(req.leader_id);
         }
 
-        if req.leader_commit > commit_idx {
-            // apply entries up to leader_commit (handled by main loop, but we can signal it here)
-
-            let log = &self.node.read().await.log;
-
-            let entries_to_apply = log
-                .iter()
-                .filter(|entry| entry.index <= req.leader_commit)
-                .cloned()
-                .collect::<Vec<_>>();
-
-            for entry in entries_to_apply {
-                let _ = self.event_sender.send(entry.command).await;
-            }
-
+        {
             let mut node = self.node.write().await;
-            node.set_commit_index(req.leader_commit);
-        }
 
-        // Step 3: Check log matching - reject if no entry at prevLogIndex with prevLogTerm
-        let prev_log_matches = if req.prev_log_index == 0 {
-            req.prev_log_term == 0
-        } else if req.prev_log_index > node_log_len {
-            false
-        } else {
-            let node = self.node.read().await;
-            let entry_at_prev = node.log.get((req.prev_log_index - 1) as usize);
-            match entry_at_prev {
-                Some(entry) => entry.term == req.prev_log_term,
-                None => false,
+            // Check if prev_log_index exists and term matches
+            // Note: log is 0-indexed, prev_log_index is 1-based (Raft uses 1-based indices)
+            let prev_log_matches = if req.prev_log_index == 0 {
+                true
+            } else {
+                let log_len = node.log.len() as u64;
+                if req.prev_log_index > log_len {
+                    false
+                } else {
+                    // Check if the term at (prev_log_index - 1) matches (0-indexed)
+                    let idx = (req.prev_log_index - 1) as usize;
+                    node.log.get(idx).map(|e| e.term == req.prev_log_term).unwrap_or(false)
+                }
+            };
+
+            if !prev_log_matches {
+                return Ok(Response::new(ProtoAppendEntriesResponse {
+                    success: false,
+                    term,
+                }));
             }
-        };
 
-        if !prev_log_matches {
-            return Ok(Response::new(ProtoAppendEntriesResponse {
-                success: false,
-                term,
-            }));
+            // Truncate log after prev_log_index if there are conflicting entries
+            let new_start_index = req.prev_log_index as usize;
+            if node.log.len() > new_start_index {
+                node.log.truncate(new_start_index);
+            }
+
+            // store the new entries
+            if !req.entries.is_empty() {
+                for entry in req.entries {
+                    node.push_log(entry.command, Some(entry.term))
+                        .await
+                        .map_err(|err| Status::internal(format!("failed to append log: {err}")))?;
+
+                    node.send_commited_entries().await.map_err(|err| {
+                        Status::internal(format!("failed to send committed entries: {err}"))
+                    })?;
+                }
+            }
+
+            // If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+            if req.leader_commit > commit_idx {
+                let new_commit_idx =
+                    std::cmp::min(req.leader_commit, node.last_log_index().unwrap_or(0));
+                node.set_commit_index(new_commit_idx);
+            }
         }
 
-        // Step 4 & 5: Handle log consistency and append new entries
-        // Remove conflicting entries and append new ones
-        let mut node = self.node.write().await;
-        let log_len = node.log.len() as u64;
-
-        // Truncate log at conflict point (entries after prev_log_index)
-        if req.prev_log_index < log_len {
-            node.log.truncate(req.prev_log_index as usize);
-        }
-
-        // Append new entries not already in log
-        for proto_entry in req.entries {
-            let new_entry = crate::log::log::LogEntry::new(proto_entry.term, proto_entry.command);
-            node.log.push(new_entry);
-        }
-
-        // Step 6: Update commit index if leader committed more
-        let current_commit = node.get_commit_index();
-        let new_commit_index = req.leader_commit.min(node.log.len() as u64);
-        if new_commit_index > current_commit {
-            node.set_commit_index(new_commit_index);
-        }
-
-        // Persist state before responding (Raft spec: must persist before replying)
-        node.persist()
-            .await
-            .map_err(|err| Status::internal(format!("failed to persist log: {err}")))?;
-
-        let _ = self
-            .scheduler_tx
+        self.scheduler_tx
             .send(SchedulerEvent::ElectionTimeout)
-            .await;
+            .await
+            .map_err(|err| Status::internal(format!("failed to reset election timer: {err}")))?;
 
         Ok(Response::new(ProtoAppendEntriesResponse {
             success: true,
@@ -295,10 +282,7 @@ impl RaftRpc for NodeRpcService {
         &self,
         request: Request<ProtoRequestVoteRequest>,
     ) -> Result<Response<ProtoRequestVoteResponse>, Status> {
-        println!(
-            "Received RequestVote from {}",
-            request.get_ref().candidate_id
-        );
+        info!(candidate_id = %request.get_ref().candidate_id, "received request_vote");
 
         return self.request_vote_svc(request).await;
     }
@@ -307,10 +291,7 @@ impl RaftRpc for NodeRpcService {
         &self,
         request: Request<ProtoAppendEntriesRequest>,
     ) -> Result<Response<ProtoAppendEntriesResponse>, Status> {
-        println!(
-            "Received AppendEntries from {}",
-            request.get_ref().leader_id
-        );
+        info!(leader_id = %request.get_ref().leader_id, "received append_entries");
 
         self.append_entries_svc(request).await
     }
@@ -320,7 +301,7 @@ impl RaftRpc for NodeRpcService {
         request: Request<Streaming<ProtoInstallSnapshotRequest>>,
     ) -> Result<Response<ProtoInstallSnapshotResponse>, Status> {
         let stream = request.into_inner();
-        println!("Received InstallSnapshot streaming");
+        info!("received install_snapshot stream");
 
         self.install_snapshot_svc(stream).await
     }
@@ -334,7 +315,10 @@ pub async fn send_request_vote(
     last_log_term: u64,
 ) -> Result<Response<ProtoRequestVoteResponse>, NodeError> {
     let endpoint = normalize_target_uri(target)?;
-    let channel = Endpoint::from_shared(endpoint)?.connect().await?;
+    let channel = Endpoint::from_shared(endpoint)?
+        .timeout(Duration::from_secs(1))
+        .connect()
+        .await?;
     let mut client = RaftRpcClient::new(channel);
 
     let res = client
@@ -360,7 +344,10 @@ pub async fn send_append_entries(
     leader_commit: u64,
 ) -> Result<Response<ProtoAppendEntriesResponse>, NodeError> {
     let endpoint = normalize_target_uri(target)?;
-    let channel = Endpoint::from_shared(endpoint)?.connect().await?;
+    let channel = Endpoint::from_shared(endpoint)?
+        .timeout(Duration::from_secs(10))
+        .connect()
+        .await?;
     let mut client = RaftRpcClient::new(channel);
 
     let res = client
@@ -485,7 +472,12 @@ mod tests {
             let mut event_rx = event_rx;
             while event_rx.recv().await.is_some() {}
         });
-        let (rpc_tx, _) = mpsc::channel::<SchedulerEvent>(256);
+        let (rpc_tx, rpc_rx) = mpsc::channel::<SchedulerEvent>(256);
+        // Keep receiver alive so scheduler events can be sent
+        tokio::spawn(async move {
+            let mut rpc_rx = rpc_rx;
+            while rpc_rx.recv().await.is_some() {}
+        });
         let node = Arc::new(RwLock::new(RaftNode::new(
             "node-1".to_string(),
             vec![],
@@ -505,7 +497,12 @@ mod tests {
             let mut event_rx = event_rx;
             while event_rx.recv().await.is_some() {}
         });
-        let (rpc_tx, _) = mpsc::channel::<SchedulerEvent>(256);
+        let (rpc_tx, rpc_rx) = mpsc::channel::<SchedulerEvent>(256);
+        // Keep receiver alive so scheduler events can be sent
+        tokio::spawn(async move {
+            let mut rpc_rx = rpc_rx;
+            while rpc_rx.recv().await.is_some() {}
+        });
         let node = Arc::new(RwLock::new(RaftNode::new(
             "node-1".to_string(),
             peers,
@@ -787,9 +784,8 @@ mod tests {
     async fn append_entries_updates_commit_index() {
         let (node, service) = create_test_node_and_service();
 
-        let result = timeout(
-            Duration::from_millis(200),
-            service.append_entries(Request::new(ProtoAppendEntriesRequest {
+        let response = service
+            .append_entries(Request::new(ProtoAppendEntriesRequest {
                 term: 1,
                 leader_id: "leader-1".to_string(),
                 prev_log_index: 0,
@@ -807,12 +803,14 @@ mod tests {
                     },
                 ],
                 leader_commit: 2,
-            })),
-        )
-        .await;
+            }))
+            .await
+            .expect("should succeed");
 
-        assert!(result.is_err(), "expected timeout with current implementation");
-        let _ = node;
+        assert!(response.into_inner().success);
+        // Verify commit index was updated
+        let node = node.read().await;
+        assert_eq!(node.get_commit_index(), 1); // max commit is min(leader_commit, last_log_index) = min(2, 1) = 1
     }
 
     #[tokio::test]
@@ -979,8 +977,18 @@ mod tests {
     async fn append_entries_persists_log_before_response() {
         use crate::storage::MockStore;
 
-        let (event_tx, _) = mpsc::channel::<Vec<u8>>(256);
-        let (rpc_tx, _) = mpsc::channel::<SchedulerEvent>(256);
+        let (event_tx, event_rx) = mpsc::channel::<Vec<u8>>(256);
+        // Keep receiver alive so event sends don't fail
+        tokio::spawn(async move {
+            let mut event_rx = event_rx;
+            while event_rx.recv().await.is_some() {}
+        });
+        let (rpc_tx, rpc_rx) = mpsc::channel::<SchedulerEvent>(256);
+        // Keep receiver alive so scheduler events can be sent
+        tokio::spawn(async move {
+            let mut rpc_rx = rpc_rx;
+            while rpc_rx.recv().await.is_some() {}
+        });
         let node = Arc::new(RwLock::new(RaftNode::new(
             "node-1".to_string(),
             vec![],
@@ -1334,21 +1342,22 @@ mod tests {
         ];
 
         // Append with leader_commit = 2
-        let result = timeout(
-            Duration::from_millis(200),
-            service.append_entries(Request::new(ProtoAppendEntriesRequest {
+        let response = service
+            .append_entries(Request::new(ProtoAppendEntriesRequest {
                 term: 1,
                 leader_id: "leader-1".to_string(),
                 prev_log_index: 0,
                 prev_log_term: 0,
                 entries,
                 leader_commit: 2,
-            })),
-        )
-        .await;
+            }))
+            .await
+            .expect("should succeed");
 
-        assert!(result.is_err(), "expected timeout with current implementation");
-        let _ = node;
+        assert!(response.into_inner().success);
+        // Verify commit index was updated (max is min(leader_commit, last_log_index) = min(2, 1) = 1)
+        let node = node.read().await;
+        assert_eq!(node.get_commit_index(), 1);
     }
 
     // === Leader Election: Become Leader/Follower ===

@@ -1,6 +1,7 @@
 services:
   node-1:
-    build: .
+    image: rust-raft:local
+    pull_policy: never
     networks:
       - raft-net
     ports:
@@ -15,7 +16,8 @@ services:
       KV_HTTP_ADDR: 0.0.0.0:8081
 
   node-2:
-    build: .
+    image: rust-raft:local
+    pull_policy: never
     networks:
       - raft-net
     ports:

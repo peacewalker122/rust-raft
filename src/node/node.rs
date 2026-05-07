@@ -137,17 +137,15 @@ impl RaftNode {
     }
 
     pub fn last_log_index(&self) -> Result<u64, NodeError> {
-        self.log
-            .last()
-            .map(|entry| entry.index)
-            .ok_or(NodeError::EmptyLog)
+        let log = self.log.last().map(|entry| entry.index);
+
+        Ok(log.unwrap_or(0))
     }
 
     pub fn last_log_term(&self) -> Result<u64, NodeError> {
-        self.log
-            .last()
-            .map(|entry| entry.term)
-            .ok_or(NodeError::EmptyLog)
+        let log = self.log.last().map(|entry| entry.term);
+
+        Ok(log.unwrap_or(0))
     }
 
     pub fn get_peers(&self) -> &[String] {
@@ -182,10 +180,10 @@ impl RaftNode {
     }
 
     pub async fn push_log(&mut self, data: Vec<u8>, term: Option<u64>) -> Result<(), NodeError> {
+        tracing::info!(node_id = %self.id, term = self.current_term, event = "pushing_log_entry");
+
         // Get prev log index/term before pushing
         let log_len = self.log.len() as u64;
-        let prev_log_index = log_len.saturating_sub(1);
-        let prev_log_term = self.log.last().map(|e| e.term).unwrap_or(0);
 
         // Use provided term or fall back to current_term
         let entry_term = term.unwrap_or(self.current_term);
@@ -198,29 +196,30 @@ impl RaftNode {
         });
         self.persist().await?;
 
-        // 2. Replicate to all peers
-        let term = self.current_term;
-        let leader_id = self.id.clone();
+        Ok(())
+    }
 
-        // Convert entry to proto format
-        let proto_entries = vec![rpc::proto::LogEntry {
-            term: self.log.last().unwrap().term,
-            index: self.log.len() as u64,
-            command: self.log.last().unwrap().command.clone(),
-        }];
-
+    pub async fn send_to_peers(&mut self, data: Vec<u8>) -> Result<(), NodeError> {
         let min_qourum = self.get_min_majority_vote();
         let mut success_count = 1; // Count self vote
+        let term = self.current_term;
+
+        let proto_entries = vec![rpc::proto::LogEntry {
+            term,
+            index: self.last_log_index().unwrap_or(0) + 1, // Next log index
+            command: data,
+        }];
 
         for peer in &self.peers {
-            let prev_idx = prev_log_index;
-            let prev_term = prev_log_term;
+            let prev_idx = self.last_log_index().unwrap_or(0);
+            let prev_term = self.last_log_term().unwrap_or(0);
 
             // Send to peer (ignore errors for now - leader will retry)
+            tracing::info!(node_id = %self.id, peer = %peer, term = term, prev_log_index = prev_idx, prev_log_term = prev_term, entries_len = proto_entries.len(), commit_index = self.commit_index, event = "sending_append_entries");
             let res = rpc::send_append_entries(
                 peer,
                 term,
-                &leader_id,
+                &self.id.clone(),
                 prev_idx,
                 prev_term,
                 proto_entries.clone(),
@@ -233,14 +232,29 @@ impl RaftNode {
             }
         }
 
+        tracing::info!(node_id = %self.id, term = term, success_count = success_count, min_qourum = min_qourum, event = "append_entries_results");
         if success_count >= min_qourum {
             self.commit_index = self.log.len() as u64;
-
-            self.event_sender
-                .send(self.log.last().unwrap().command.clone())
-                .await
-                .map_err(|e| NodeError::EventSend(e))?;
         }
+
+        Ok(())
+    }
+
+    pub async fn send_commited_entries(&self) -> Result<(), NodeError> {
+        self.event_sender
+            .send(
+                self.log
+                    .last()
+                    .unwrap_or(&LogEntry {
+                        term: 0,
+                        index: 0,
+                        command: Vec::new(),
+                    })
+                    .command
+                    .clone(),
+            )
+            .await
+            .map_err(NodeError::EventSend)?;
 
         Ok(())
     }
@@ -314,11 +328,7 @@ impl RaftNode {
     }
 
     pub async fn get_raft_state(&self) -> Result<PersistentState, NodeError> {
-        let res = self
-            .storage
-            .load()
-            .await
-            .map_err(|e| NodeError::Storage(e))?;
+        let res = self.storage.load().await.map_err(NodeError::Storage)?;
 
         Ok(res)
     }

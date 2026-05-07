@@ -31,7 +31,10 @@ dev:
 	@echo "Use 'cargo watch -x run' if installed for live reload."
 
 docker-build:
-	docker build -t $(DOCKER_IMAGE) .
+	docker buildx build --load --cache-from=type=local,src=.buildx-cache --cache-to=type=local,dest=.buildx-cache-new,mode=max -t $(DOCKER_IMAGE) . && rm -rf .buildx-cache && mv .buildx-cache-new .buildx-cache
 
 docker-integration:
 	docker compose -f docker-compose.test.yml up --build --wait
+
+docker-down:
+	docker compose -f docker-compose.test.yml down

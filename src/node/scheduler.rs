@@ -169,8 +169,12 @@ impl NodeScheduler {
 
             for peer in &peers {
                 match self.send_append_entries(peer).await {
-                    Ok(_) => tracing::trace!(node_id = %node_id, term = term, target = %peer, event = "heartbeat"),
-                    Err(e) => tracing::error!(node_id = %node_id, error = %format!("heartbeat_failed: {}", e), context = "send_append_entries"),
+                    Ok(_) => {
+                        tracing::trace!(node_id = %node_id, term = term, target = %peer, event = "heartbeat")
+                    }
+                    Err(e) => {
+                        tracing::error!(node_id = %node_id, error = %format!("heartbeat_failed: {}", e), context = "send_append_entries")
+                    }
                 }
             }
         }
@@ -183,13 +187,21 @@ impl NodeScheduler {
             if !node.is_leader() {
                 return;
             }
-            (node.get_id().to_string(), node.get_term(), node.get_peers().to_vec())
+            (
+                node.get_id().to_string(),
+                node.get_term(),
+                node.get_peers().to_vec(),
+            )
         };
 
         for peer in &peers {
             match self.send_append_entries(peer).await {
-                Ok(_) => tracing::trace!(node_id = %node_id, term = term, target = %peer, event = "heartbeat"),
-                Err(e) => tracing::error!(node_id = %node_id, error = %format!("heartbeat_failed: {}", e), context = "send_append_entries"),
+                Ok(_) => {
+                    tracing::trace!(node_id = %node_id, term = term, target = %peer, event = "heartbeat")
+                }
+                Err(e) => {
+                    tracing::error!(node_id = %node_id, error = %format!("heartbeat_failed: {}", e), context = "send_append_entries")
+                }
             }
         }
     }
@@ -234,14 +246,14 @@ impl NodeScheduler {
 
 fn randomized_election_timeout() -> u64 {
     let mut rng = rand::rng();
-    let timeout_ms = rng.random_range(500..1000);
+    let timeout_ms = rng.random_range(5000..10000);
 
     timeout_ms
 }
 
 fn randomized_heartbeat_timeout() -> u64 {
     let mut rng = rand::rng();
-    let timeout_ms = rng.random_range(0..50);
+    let timeout_ms = rng.random_range(500..1000);
 
     timeout_ms
 }

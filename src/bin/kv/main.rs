@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use rust_raft::{
     config::RaftConfig,
@@ -133,10 +133,19 @@ fn read_bytes(data: &[u8], cursor: &mut usize, length: usize) -> Result<Vec<u8>,
 }
 
 async fn apply_events_to_store(mut receiver: mpsc::Receiver<Vec<u8>>, store: Arc<RwLock<KvStore>>) {
-    while let Some(payload) = receiver.recv().await {
-        if let Ok(command) = decode_command(&payload) {
-            let mut store = store.write().await;
-            store.apply(command);
+    loop {
+        if let Some(payload) = receiver.recv().await {
+            tracing::info!("applying command from log: {} bytes", payload.len());
+            match decode_command(&payload) {
+                Ok(command) => {
+                    store.write().await.apply(command);
+                }
+                Err(err) => {
+                    eprintln!("failed to decode command: {err:?}");
+                }
+            }
+        } else {
+            continue;
         }
     }
 }
@@ -316,8 +325,13 @@ async fn apply_command(command: KvCommand, node: &Arc<RwLock<RaftNode>>) -> Stri
     }
 
     let payload = encode_command(&command);
-    match node.push_log(payload, None).await {
-        Ok(()) => text_response("ok".to_string()),
+    match node.push_log(payload.clone(), None).await {
+        Ok(()) => {
+            node.send_to_peers(payload.clone()).await.ok();
+            node.send_commited_entries().await.ok();
+
+            text_response("ok".to_string())
+        }
         Err(err) => server_error(&format!("raft error: {err}")),
     }
 }
@@ -857,6 +871,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("KV demo UI available at http://{http_addr}");
 
     Server::builder()
+        .timeout(Duration::from_secs(2))
         .add_service(RaftRpcServer::new(NodeRpcService::new(
             shared_node,
             scheduler_tx,
